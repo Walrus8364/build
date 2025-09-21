@@ -94,6 +94,9 @@ jobs:
             ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro:${{ matrix.arch }}
             ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/lsky-pro:${{ matrix.arch }}
           push: true
+          # 禁用 provenance 和 sbom，避免创建额外的 manifest
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -143,12 +146,14 @@ jobs:
           docker manifest inspect ${GITEA_IMAGE_BASE}:amd64 || echo "❌ amd64 image not found or is manifest list"
           docker manifest inspect ${GITEA_IMAGE_BASE}:arm64 || echo "❌ arm64 image not found or is manifest list"
 
-          # 如果架构镜像是 manifest list，跳过创建
+          # 检查架构镜像是否存在
           if docker manifest inspect ${GITEA_IMAGE_BASE}:amd64 >/dev/null 2>&1 && docker manifest inspect ${GITEA_IMAGE_BASE}:arm64 >/dev/null 2>&1; then
             echo "Both architecture images exist, creating manifest list..."
+
+            # 由于架构标签可能是 manifest list，我们使用 --amend 来处理
             docker manifest create ${GITEA_LATEST_TAG} \
-              ${GITEA_IMAGE_BASE}:amd64 \
-              ${GITEA_IMAGE_BASE}:arm64
+              --amend ${GITEA_IMAGE_BASE}:amd64 \
+              --amend ${GITEA_IMAGE_BASE}:arm64
             docker manifest push ${GITEA_LATEST_TAG}
             echo "✅ Gitea manifest pushed successfully"
           else
@@ -171,9 +176,11 @@ jobs:
           # 如果架构镜像存在，创建 manifest list
           if docker manifest inspect ${GHCR_IMAGE_BASE}:amd64 >/dev/null 2>&1 && docker manifest inspect ${GHCR_IMAGE_BASE}:arm64 >/dev/null 2>&1; then
             echo "Both architecture images exist, creating manifest list..."
+
+            # 由于架构标签可能是 manifest list，我们使用 --amend 来处理
             docker manifest create ${GHCR_LATEST_TAG} \
-              ${GHCR_IMAGE_BASE}:amd64 \
-              ${GHCR_IMAGE_BASE}:arm64
+              --amend ${GHCR_IMAGE_BASE}:amd64 \
+              --amend ${GHCR_IMAGE_BASE}:arm64
             docker manifest push ${GHCR_LATEST_TAG}
             echo "✅ GitHub manifest pushed successfully"
           else
