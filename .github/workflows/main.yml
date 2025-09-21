@@ -25,17 +25,10 @@ jobs:
       packages: write
 
     steps:
-      - name: Read Gitea Commit SHA from trigger file
-        id: gitea_commit
-        uses: actions/checkout@v4
-        with:
-          run: echo "sha=$(cat trigger.txt)" >> $GITHUB_OUTPUT
-          
       - name: Checkout Gitea repository at specific commit
         uses: actions/checkout@v4
         with:
           repository: ${{ secrets.GITEA_REPO_PATH }}
-          ref: ${{ steps.gitea_commit.outputs.sha }}
           clean: true
           github-server-url: https://${{ secrets.GITEA_HOST }}
           token: ${{ secrets.GITEA_CODE_PAT }}
