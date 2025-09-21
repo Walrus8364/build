@@ -26,10 +26,9 @@ jobs:
 
     steps:
       - name: Checkout Gitea repository at specific commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ secrets.GITEA_REPO_PATH }}
-          clean: true
           github-server-url: https://${{ secrets.GITEA_HOST }}
           token: ${{ secrets.GITEA_CODE_PAT }}
 
