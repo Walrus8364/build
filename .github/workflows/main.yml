@@ -30,13 +30,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           run: echo "sha=$(cat trigger.txt)" >> $GITHUB_OUTPUT
-      
+          
       - name: Checkout Gitea repository at specific commit
         uses: actions/checkout@v4
         with:
-          repository: https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_REPO_PATH }}
+          repository: ${{ secrets.GITEA_REPO_PATH }}
           ref: ${{ steps.gitea_commit.outputs.sha }}
           clean: true
+          github-server-url: https://${{ secrets.GITEA_HOST }}
+          token: ${{ secrets.GITEA_CODE_PAT }}
 
       - name: Set up Node.js and pnpm
         uses: actions/setup-node@v4
