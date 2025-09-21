@@ -85,7 +85,7 @@ jobs:
         with:
           # 定义两个镜像仓库
           images: |
-            ${{ secrets.GITEA_HOST }}/lsky-pro
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro
             ghcr.io/lsky-pro
           tags: |
             # 为每个镜像生成带架构后缀的标签
@@ -128,7 +128,7 @@ jobs:
 
       - name: Create and push manifest lists to both registries
         run: |
-          GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/lsky-pro"
+          GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro"
           GHCR_IMAGE_BASE="ghcr.io/lsky-pro"
 
           # --- Gitea Manifest ---
