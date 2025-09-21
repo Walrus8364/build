@@ -86,7 +86,7 @@ jobs:
           # 定义两个镜像仓库
           images: |
             ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro
-            ghcr.io/lsky-pro
+            ghcr.io/${{ github.actor }}/lsky-pro
           tags: |
             # 为每个镜像生成带架构后缀的标签
             type=raw,value=${{ matrix.arch }}
@@ -129,7 +129,7 @@ jobs:
       - name: Create and push manifest lists to both registries
         run: |
           GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro"
-          GHCR_IMAGE_BASE="ghcr.io/lsky-pro"
+          GHCR_IMAGE_BASE="ghcr.io/${{ github.actor }}/lsky-pro"
 
           # --- Gitea Manifest ---
           GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
@@ -146,6 +146,6 @@ jobs:
       - name: Inspect final manifests
         run: |
           echo "--- Gitea Manifest ---"
-          docker manifest inspect ${{ secrets.GITEA_HOST }}/lsky-pro:latest
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro:latest
           echo "--- GitHub Manifest ---"
-          docker manifest inspect ghcr.io/lsky-pro:latest
+          docker manifest inspect ghcr.io/${{ github.actor }}/lsky-pro:latest
