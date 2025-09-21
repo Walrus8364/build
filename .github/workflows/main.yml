@@ -25,12 +25,30 @@ jobs:
       packages: write
 
     steps:
-      - name: Checkout Gitea repository at specific commit
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ secrets.GITEA_REPO_PATH }}
-          github-server-url: https://${{ secrets.GITEA_HOST }}
-          token: ${{ secrets.GITEA_CODE_PAT }}
+      - name: Clone Gitea repository
+        run: |
+          # Read the commit SHA from trigger file (if exists)
+          if [ -f trigger.txt ]; then
+            COMMIT_SHA=$(cat trigger.txt)
+            echo "Using commit SHA from trigger.txt: $COMMIT_SHA"
+          else
+            echo "No trigger.txt found, will use latest commit"
+            COMMIT_SHA=""
+          fi
+
+          # Clone the Gitea repository
+          git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_REPO_PATH }}.git .
+
+          # Checkout specific commit if provided
+          if [ -n "$COMMIT_SHA" ]; then
+            git checkout $COMMIT_SHA
+            echo "Checked out commit: $COMMIT_SHA"
+          else
+            echo "Using latest commit: $(git rev-parse HEAD)"
+          fi
+
+          # Export commit SHA for later steps
+          echo "GITEA_COMMIT_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
       - name: Set up Node.js and pnpm
         uses: actions/setup-node@v4
@@ -74,7 +92,7 @@ jobs:
             type=raw,value=git-${{ steps.gitea_commit.outputs.sha }}-${{ matrix.arch }}
 
       - name: Build and push Docker image to both registries
-        uses: docker/build-push-action@v5
+        uses: docker/build-action@v5
         with:
           context: .
           file: ./docker/Dockerfile
