@@ -60,7 +60,8 @@ jobs:
         run: |
           cd web
           pnpm install --frozen-lockfile
-          pnpm build
+          # 设置环境变量自动批准所有提示
+          CI=true pnpm build
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -79,6 +80,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set lowercase username
+        run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
       - name: Build and push Docker image to both registries
         uses: docker/build-push-action@v5
         with:
@@ -88,7 +92,7 @@ jobs:
           # 直接指定架构特定的标签，确保推送单个架构镜像
           tags: |
             ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro:${{ matrix.arch }}
-            ghcr.io/${{ github.actor }}/lsky-pro:${{ matrix.arch }}
+            ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/lsky-pro:${{ matrix.arch }}
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -116,10 +120,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set lowercase username
+        run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
       - name: Create and push manifest lists to both registries
         run: |
           GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro"
-          GHCR_IMAGE_BASE="ghcr.io/${{ github.actor }}/lsky-pro"
+          GHCR_IMAGE_BASE="ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/lsky-pro"
 
           # --- Gitea Manifest ---
           GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
@@ -152,6 +159,6 @@ jobs:
       - name: Inspect final manifests
         run: |
           echo "--- Gitea Manifest ---"
-          docker manifest inspect ${{ secrets.GITEA_HOST }}/lsky-pro:latest
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro:latest
           echo "--- GitHub Manifest ---"
-          docker manifest inspect ghcr.io/${{ github.actor }}/lsky-pro:latest
+          docker manifest inspect ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/lsky-pro:latest
