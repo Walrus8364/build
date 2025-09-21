@@ -80,7 +80,7 @@ jobs:
             type=raw,value=git-${{ steps.gitea_commit.outputs.sha }}-${{ matrix.arch }}
 
       - name: Build and push Docker image to both registries
-        uses: docker/build-action@v5
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: ./docker/Dockerfile
