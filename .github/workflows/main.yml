@@ -1,0 +1,151 @@
+# .github/workflows/build-from-gitea-dual-push.yml
+name: Build From Gitea & Push to Gitea+GHCR
+
+on:
+  push:
+    paths:
+      - 'trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  build-and-push-arch:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-latest-arm64
+    
+    runs-on: ${{ matrix.runner }}
+
+    # 授予 GITHUB_TOKEN 写包的权限
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Read Gitea Commit SHA from trigger file
+        id: gitea_commit
+        uses: actions/checkout@v4
+        with:
+          run: echo "sha=$(cat trigger.txt)" >> $GITHUB_OUTPUT
+      
+      - name: Checkout Gitea repository at specific commit
+        uses: actions/checkout@v4
+        with:
+          repository: https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_REPO_PATH }}.git
+          ref: ${{ steps.gitea_commit.outputs.sha }}
+          clean: true
+
+      - name: Set up Node.js and pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install -g pnpm
+
+      - name: Build frontend assets
+        run: |
+          cd web
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for both registries
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # 定义两个镜像仓库
+          images: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_REPO_PATH }}
+            ghcr.io/${{ github.repository }}
+          tags: |
+            # 为每个镜像生成带架构后缀的标签
+            type=raw,value=git-${{ steps.gitea_commit.outputs.sha }}-${{ matrix.arch }}
+
+      - name: Build and push Docker image to both registries
+        uses: docker/build-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          # metadata-action 会为两个仓库都生成标签，build-action 会全部推送
+          tags: ${{ steps.meta.outputs.tags }}
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  merge-manifest:
+    needs: build-and-push-arch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      
+    steps:
+      - name: Read Gitea Commit SHA from trigger file
+        id: gitea_commit
+        uses: actions/checkout@v4
+        with:
+          run: echo "sha=$(cat trigger.txt)" >> $GITHUB_OUTPUT
+
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest lists to both registries
+        run: |
+          GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_REPO_PATH }}"
+          GHCR_IMAGE_BASE="ghcr.io/${{ github.repository }}"
+          VERSION_SHA="git-${{ steps.gitea_commit.outputs.sha }}"
+
+          # --- Gitea Manifest ---
+          GITEA_FINAL_TAG="${GITEA_IMAGE_BASE}:${VERSION_SHA}"
+          GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
+          echo "Creating and pushing Gitea manifests..."
+          docker manifest create ${GITEA_FINAL_TAG} --amend ${GITEA_IMAGE_BASE}:${VERSION_SHA}-amd64 --amend ${GITEA_IMAGE_BASE}:${VERSION_SHA}-arm64
+          docker manifest push ${GITEA_FINAL_TAG}
+          docker manifest create ${GITEA_LATEST_TAG} --amend ${GITEA_IMAGE_BASE}:${VERSION_SHA}-amd64 --amend ${GITEA_IMAGE_BASE}:${VERSION_SHA}-arm64
+          docker manifest push ${GITEA_LATEST_TAG}
+          
+          # --- GitHub Manifest ---
+          GHCR_FINAL_TAG="${GHCR_IMAGE_BASE}:${VERSION_SHA}"
+          GHCR_LATEST_TAG="${GHCR_IMAGE_BASE}:latest"
+          echo "Creating and pushing GitHub manifests..."
+          docker manifest create ${GHCR_FINAL_TAG} --amend ${GHCR_IMAGE_BASE}:${VERSION_SHA}-amd64 --amend ${GHCR_IMAGE_BASE}:${VERSION_SHA}-arm64
+          docker manifest push ${GHCR_FINAL_TAG}
+          docker manifest create ${GHCR_LATEST_TAG} --amend ${GHCR_IMAGE_BASE}:${VERSION_SHA}-amd64 --amend ${GHCR_IMAGE_BASE}:${VERSION_SHA}-arm64
+          docker manifest push ${GHCR_LATEST_TAG}
+
+      - name: Inspect final manifests
+        run: |
+          echo "--- Gitea Manifest ---"
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_REPO_PATH }}:latest
+          echo "--- GitHub Manifest ---"
+          docker manifest inspect ghcr.io/${{ github.repository }}:latest
