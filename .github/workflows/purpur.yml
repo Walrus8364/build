@@ -104,7 +104,7 @@ jobs:
           push: true
           # 禁用 provenance 和 sbom，避免创建额外的 manifest
           provenance: false
-          bom: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
