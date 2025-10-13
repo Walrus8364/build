@@ -37,7 +37,7 @@ jobs:
           fi
 
           # Clone the Gitea repository
-          git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/n8n.git .
+          git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n.git .
 
           # Checkout specific commit if provided
           if [ -n "$COMMIT_SHA" ]; then
