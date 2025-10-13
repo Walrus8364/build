@@ -76,6 +76,7 @@ jobs:
 
       - name: Build and push Docker image to both registries
         id: buildx1
+        continue-on-error: true
         uses: docker/build-push-action@v5
         with:
           context: .
