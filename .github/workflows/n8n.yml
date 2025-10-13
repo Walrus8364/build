@@ -74,6 +74,28 @@ jobs:
         run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Build and push Docker image to both registries
+        id: buildx1
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          # 直接指定架构特定的标签，确保推送单个架构镜像
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n:${{ matrix.arch }}
+            ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/n8n:${{ matrix.arch }}
+          push: true
+          # 禁用 provenance 和 sbom，避免创建额外的 manifest
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Wait to retry
+        if: steps.buildx1.outcome != 'success'
+        run: |
+          sleep 10
+      - name: Build and push Docker image to both registries
+        if: steps.buildx1.outcome != 'success'
         uses: docker/build-push-action@v5
         with:
           context: .
