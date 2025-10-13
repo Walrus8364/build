@@ -102,6 +102,9 @@ jobs:
             BASE_IMAGE=${{ env.BASE_IMAGE }}
           tags: ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/${{ env.GITEA_IMAGE_NAME }}:${{ env.MC_VERSION }}-${{ matrix.arch }}
           push: true
+          # 禁用 provenance 和 sbom，避免创建额外的 manifest
+          provenance: false
+          bom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
