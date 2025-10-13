@@ -92,6 +92,29 @@ jobs:
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
+        id: buildx1
+        with:
+          context: ./purpur
+          file: ./purpur/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            MC_VERSION=${{ env.MC_VERSION }}
+            # 将动态决定的基础镜像名传递给 Dockerfile
+            BASE_IMAGE=${{ env.BASE_IMAGE }}
+          tags: ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/${{ env.GITEA_IMAGE_NAME }}:${{ env.MC_VERSION }}-${{ matrix.arch }}
+          push: true
+          # 禁用 provenance 和 sbom，避免创建额外的 manifest
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Wait to retry
+        if: steps.buildx1.outcome != 'success'
+        run: |
+          sleep 10
+      - name: Build and push Docker image
+        if: steps.buildx1.outcome != 'success'
+        uses: docker/build-push-action@v5
         with:
           context: ./purpur
           file: ./purpur/Dockerfile
