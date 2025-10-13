@@ -14,11 +14,14 @@ env:
   # 当 push 触发时使用的默认版本
   DEFAULT_MC_VERSION: "1.20.4" 
   GITEA_IMAGE_NAME: "purpur"
+  # Minecraft 1.20.5 是第一个需要 Java 21 的版本
+  JAVA_21_CUTOFF_VERSION: "1.20.5"
 
 jobs:
   build-and-push-arch:
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - arch: amd64
@@ -34,7 +37,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- 核心改动：在 job 开始时确定最终要使用的版本号 ---
       - name: Determine Minecraft Version
         id: get_version
         run: |
@@ -43,6 +45,20 @@ jobs:
           VERSION=${{ github.event.inputs.mc_version || env.DEFAULT_MC_VERSION }}
           echo "Using Minecraft version: $VERSION"
           echo "MC_VERSION=$VERSION" >> $GITHUB_ENV
+
+          # 使用 dpkg 工具比较版本号，这比简单的字符串比较更可靠
+          if dpkg --compare-versions "$MC_VERSION" "ge" "${{ env.JAVA_21_CUTOFF_VERSION }}"; then
+            JAVA_TAG="21"
+            echo "Version $MC_VERSION requires Java 21."
+          else
+            JAVA_TAG="17"
+            echo "Version $MC_VERSION requires Java 17."
+          fi
+          
+          # 设置基础镜像环境变量，供后续步骤使用
+          BASE_IMAGE="container-registry.oracle.com/graalvm/jdk:$JAVA_TAG"
+          echo "BASE_IMAGE=$BASE_IMAGE" >> $GITHUB_ENV
+          echo "Using base image: $BASE_IMAGE"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -63,6 +79,8 @@ jobs:
           build-args: |
             # 使用上一步确定的版本号
             MC_VERSION=${{ env.MC_VERSION }}
+            # 将我们动态决定的基础镜像名传递给 Dockerfile
+            BASE_IMAGE=${{ env.BASE_IMAGE }}
           tags: ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/${{ env.GITEA_IMAGE_NAME }}:${{ env.MC_VERSION }}-${{ matrix.arch }}
           push: true
           cache-from: type=gha

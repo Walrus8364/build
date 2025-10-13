@@ -1,7 +1,8 @@
 # purpur/Dockerfile
 
-# 使用官方的 GraalVM CE 镜像，它本身就是多架构的
-FROM ghcr.io/graalvm/jdk:java17
+ARG BASE_IMAGE=container-registry.oracle.com/graalvm/jdk:17
+# 使用变量作为基础镜像
+FROM ${BASE_IMAGE}
 
 # 定义构建参数，可以从 build-push-action 传入
 ARG MC_VERSION=1.20.4
