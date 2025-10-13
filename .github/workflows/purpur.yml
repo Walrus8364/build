@@ -1,26 +1,44 @@
 # .github/workflows/build-purpur.yml
+# ----------------------------------------------------------------
+# 这是一个用于构建 Minecraft Purpur 服务端 Docker 镜像的 GitHub Actions 工作流。
+#
+# 功能特性:
+# 1. 多架构构建: 支持 amd64 和 arm64 架构。
+# 2. 动态 Java 版本: 自动根据输入的 Minecraft 版本选择 Java 17 或 Java 21 作为基础镜像。
+#    - MC >= 1.20.5 使用 Java 21
+#    - MC < 1.20.5 使用 Java 17
+# 3. 手动触发与版本控制: 支持手动触发并输入版本号，也支持通过 push 自动触发。
+#    - 最终镜像标签为 <MC_VERSION>，例如 "1.20.5"。
+#    - 各架构的中间镜像标签为 <MC_VERSION>-<arch>，例如 "1.20.5-amd64"。
+# 4. 串行执行: 构建任务将按顺序执行（先完成 amd64，再开始 arm64），便于排错和控制并发。
+# 5. 推送到私有 Gitea 仓库: 自动构建并推送到你自建的 Gitea 容器镜像仓库。
+# ----------------------------------------------------------------
+
 name: Build Purpur Docker Image & Push to Gitea
 
 on:
+  # 允许在 GitHub Actions 页面手动触发
   workflow_dispatch:
-    # --- 新增部分：定义手动触发时的输入参数 ---
     inputs:
       mc_version:
-        description: 'Minecraft Version (e.g., 1.20.4)'
+        description: 'Minecraft Version (e.g., 1.20.4, 1.20.5)'
         required: true
-        default: '1.20.4' # 手动触发时的默认值
+        default: '1.20.4'
 
+# 全局环境变量
 env:
-  # 当 push 触发时使用的默认版本
-  DEFAULT_MC_VERSION: "1.20.4" 
+  # 当 push 触发时使用的默认 Minecraft 版本
+  DEFAULT_MC_VERSION: "1.20.4"
+  # Gitea 上的镜像名称
   GITEA_IMAGE_NAME: "purpur"
-  # Minecraft 1.20.5 是第一个需要 Java 21 的版本
+  # 第一个需要 Java 21 的 Minecraft 版本，用于版本比较
   JAVA_21_CUTOFF_VERSION: "1.20.5"
 
 jobs:
   build-and-push-arch:
     strategy:
       fail-fast: false
+      # 设置最大并行数为 1，实现串行执行
       max-parallel: 1
       matrix:
         include:
@@ -28,6 +46,7 @@ jobs:
             runner: ubuntu-latest
           - arch: arm64
             runner: ubuntu-22.04-arm
+            
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -37,15 +56,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Determine Minecraft Version
-        id: get_version
+      - name: Determine Versions
+        id: get_versions
         run: |
-          # 如果是手动触发(workflow_dispatch)，则使用输入的版本号
-          # 否则，使用环境变量中定义的默认版本号
-          VERSION=${{ github.event.inputs.mc_version || env.DEFAULT_MC_VERSION }}
-          echo "Using Minecraft version: $VERSION"
-          echo "MC_VERSION=$VERSION" >> $GITHUB_ENV
+          # 步骤 1: 确定 Minecraft 版本
+          # 如果是手动触发，则使用输入的版本号；否则，使用环境变量中定义的默认版本号
+          MC_VERSION=${{ github.event.inputs.mc_version || env.DEFAULT_MC_VERSION }}
+          echo "MC_VERSION=$MC_VERSION" >> $GITHUB_ENV
+          echo "Determined Minecraft version: $MC_VERSION"
 
+          # 步骤 2: 根据 Minecraft 版本判断需要的 Java 版本
           # 使用 dpkg 工具比较版本号，这比简单的字符串比较更可靠
           if dpkg --compare-versions "$MC_VERSION" "ge" "${{ env.JAVA_21_CUTOFF_VERSION }}"; then
             JAVA_TAG="21"
@@ -55,7 +75,7 @@ jobs:
             echo "Version $MC_VERSION requires Java 17."
           fi
           
-          # 设置基础镜像环境变量，供后续步骤使用
+          # 步骤 3: 设置基础镜像环境变量，供后续步骤使用
           BASE_IMAGE="container-registry.oracle.com/graalvm/jdk:$JAVA_TAG"
           echo "BASE_IMAGE=$BASE_IMAGE" >> $GITHUB_ENV
           echo "Using base image: $BASE_IMAGE"
@@ -70,16 +90,15 @@ jobs:
           username: ${{ secrets.GITEA_USERNAME }}
           password: ${{ secrets.GITEA_REGISTRY_PAT }}
 
-      - name: Build and push Docker image with version-arch tag
+      - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: ./purpur
           file: ./purpur/Dockerfile
           platforms: linux/${{ matrix.arch }}
           build-args: |
-            # 使用上一步确定的版本号
             MC_VERSION=${{ env.MC_VERSION }}
-            # 将我们动态决定的基础镜像名传递给 Dockerfile
+            # 将动态决定的基础镜像名传递给 Dockerfile
             BASE_IMAGE=${{ env.BASE_IMAGE }}
           tags: ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/${{ env.GITEA_IMAGE_NAME }}:${{ env.MC_VERSION }}-${{ matrix.arch }}
           push: true
@@ -101,22 +120,20 @@ jobs:
           username: ${{ secrets.GITEA_USERNAME }}
           password: ${{ secrets.GITEA_REGISTRY_PAT }}
 
-      # --- 核心改动：同样在这里确定版本号，确保与上一个 job 一致 ---
       - name: Determine Minecraft Version
-        id: get_version
+        # 在这个 job 中也需要确定版本号，以保持与上一个 job 一致
         run: |
-          VERSION=${{ github.event.inputs.mc_version || env.DEFAULT_MC_VERSION }}
-          echo "Using Minecraft version: $VERSION"
-          echo "MC_VERSION=$VERSION" >> $GITHUB_ENV
+          MC_VERSION=${{ github.event.inputs.mc_version || env.DEFAULT_MC_VERSION }}
+          echo "MC_VERSION=$MC_VERSION" >> $GITHUB_ENV
 
       - name: Create and push manifest list with version tag
         run: |
           IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/${{ env.GITEA_IMAGE_NAME }}"
-          # 使用确定的版本号作为最终标签
           VERSION_TAG="${IMAGE_BASE}:${{ env.MC_VERSION }}"
 
           echo "Creating manifest list for ${VERSION_TAG}"
           
+          # 将各架构的镜像合并成一个 manifest list
           docker manifest create ${VERSION_TAG} \
             --amend ${IMAGE_BASE}:${{ env.MC_VERSION }}-amd64 \
             --amend ${IMAGE_BASE}:${{ env.MC_VERSION }}-arm64
