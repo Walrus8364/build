@@ -1,0 +1,192 @@
+# .github/workflows/build-from-gitea-dual-push.yml
+name: Build lskyproplus From Gitea & Push to Gitea+GHCR
+
+on:
+  push:
+    paths:
+      - 'lskyproplus/trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  build-and-push-arch:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+
+    runs-on: ${{ matrix.runner }}
+
+    # 授予 GITHUB_TOKEN 写包的权限
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Clone Gitea repository
+        run: |
+          # Read the commit SHA from trigger file (if exists)
+          if [ -f trigger.txt ]; then
+            COMMIT_SHA=$(cat trigger.txt)
+            echo "Using commit SHA from trigger.txt: $COMMIT_SHA"
+          else
+            echo "No trigger.txt found, will use latest commit"
+            COMMIT_SHA=""
+          fi
+
+          # Clone the Gitea repository
+          git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/Lsky-Pro-Crack.git .
+
+          # Checkout specific commit if provided
+          if [ -n "$COMMIT_SHA" ]; then
+            git checkout $COMMIT_SHA
+            echo "Checked out commit: $COMMIT_SHA"
+          else
+            echo "Using latest commit: $(git rev-parse HEAD)"
+          fi
+
+      - name: Set up Node.js and pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install -g pnpm
+
+      - name: Build frontend assets
+        run: |
+          cd web
+          pnpm install --frozen-lockfile
+          # 设置环境变量自动批准所有提示
+          CI=true pnpm build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set lowercase username
+        run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Build and push Docker image to both registries
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          # 直接指定架构特定的标签，确保推送单个架构镜像
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro:${{ matrix.arch }}
+            ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/lsky-pro:${{ matrix.arch }}
+          push: true
+          # 禁用 provenance 和 sbom，避免创建额外的 manifest
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  merge-manifest:
+    needs: build-and-push-arch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      
+    steps:
+
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set lowercase username
+        run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Create and push manifest lists to both registries
+        run: |
+          GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro"
+          GHCR_IMAGE_BASE="ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/lsky-pro"
+
+          # --- Gitea Manifest ---
+          GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
+          echo "Creating Gitea manifest list..."
+
+          # 清理所有可能存在的旧 manifest（忽略错误）
+          echo "Cleaning up old manifests..."
+          docker manifest rm ${GITEA_LATEST_TAG} 2>/dev/null || true
+          docker manifest rm ${GITEA_IMAGE_BASE}:amd64 2>/dev/null || true
+          docker manifest rm ${GITEA_IMAGE_BASE}:arm64 2>/dev/null || true
+
+          # 检查架构特定镜像状态
+          echo "Checking image status..."
+          docker manifest inspect ${GITEA_IMAGE_BASE}:amd64 || echo "❌ amd64 image not found or is manifest list"
+          docker manifest inspect ${GITEA_IMAGE_BASE}:arm64 || echo "❌ arm64 image not found or is manifest list"
+
+          # 检查架构镜像是否存在
+          if docker manifest inspect ${GITEA_IMAGE_BASE}:amd64 >/dev/null 2>&1 && docker manifest inspect ${GITEA_IMAGE_BASE}:arm64 >/dev/null 2>&1; then
+            echo "Both architecture images exist, creating manifest list..."
+
+            # 由于架构标签可能是 manifest list，我们使用 --amend 来处理
+            docker manifest create ${GITEA_LATEST_TAG} \
+              --amend ${GITEA_IMAGE_BASE}:amd64 \
+              --amend ${GITEA_IMAGE_BASE}:arm64
+            docker manifest push ${GITEA_LATEST_TAG}
+            echo "✅ Gitea manifest pushed successfully"
+          else
+            echo "❌ Architecture images not ready, skipping Gitea manifest creation"
+          fi
+
+          # --- GitHub Manifest ---
+          GHCR_LATEST_TAG="${GHCR_IMAGE_BASE}:latest"
+          echo "Creating GitHub manifest list..."
+
+          # 清理所有可能存在的旧 manifest（忽略错误）
+          docker manifest rm ${GHCR_LATEST_TAG} 2>/dev/null || true
+          docker manifest rm ${GHCR_IMAGE_BASE}:amd64 2>/dev/null || true
+          docker manifest rm ${GHCR_IMAGE_BASE}:arm64 2>/dev/null || true
+
+          # 检查架构特定镜像状态
+          docker manifest inspect ${GHCR_IMAGE_BASE}:amd64 || echo "❌ amd64 image not found or is manifest list"
+          docker manifest inspect ${GHCR_IMAGE_BASE}:arm64 || echo "❌ arm64 image not found or is manifest list"
+
+          # 如果架构镜像存在，创建 manifest list
+          if docker manifest inspect ${GHCR_IMAGE_BASE}:amd64 >/dev/null 2>&1 && docker manifest inspect ${GHCR_IMAGE_BASE}:arm64 >/dev/null 2>&1; then
+            echo "Both architecture images exist, creating manifest list..."
+
+            # 由于架构标签可能是 manifest list，我们使用 --amend 来处理
+            docker manifest create ${GHCR_LATEST_TAG} \
+              --amend ${GHCR_IMAGE_BASE}:amd64 \
+              --amend ${GHCR_IMAGE_BASE}:arm64
+            docker manifest push ${GHCR_LATEST_TAG}
+            echo "✅ GitHub manifest pushed successfully"
+          else
+            echo "❌ Architecture images not ready, skipping GitHub manifest creation"
+          fi
+
+      - name: Inspect final manifests
+        run: |
+          echo "--- Gitea Manifest ---"
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/lsky-pro:latest
+          echo "--- GitHub Manifest ---"
+          docker manifest inspect ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/lsky-pro:latest
