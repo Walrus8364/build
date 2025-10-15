@@ -10,8 +10,7 @@ ARG PURPUR_JAR_NAME=purpur.jar
 
 
 # 安装 curl 用于下载，并清理缓存
-RUN mkdir /app && \
-    microdnf install curl && \
+RUN microdnf install curl && \
     microdnf clean all
 
 # 下载 Purpur 服务端
