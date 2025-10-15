@@ -29,4 +29,4 @@ exec java -Xms${MEMORY} -Xmx${MEMORY} \
     -XX:MaxTenuringThreshold=1 \
     -Dusing.aikars.flags=https://mcflags.emc.gs \
     -Daikars.new.flags=true \
-    -jar purpur.jar --nogui
+    -jar /app/purpur.jar --nogui
