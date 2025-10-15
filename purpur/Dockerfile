@@ -8,7 +8,6 @@ FROM ${BASE_IMAGE}
 ARG MC_VERSION=1.20.4
 ARG PURPUR_JAR_NAME=purpur.jar
 
-
 # 安装 curl 用于下载，并清理缓存
 RUN microdnf install curl && \
     microdnf clean all
@@ -22,6 +21,8 @@ COPY start.sh /app/start.sh
 
 # 给予启动脚本执行权限
 RUN chmod +x /app/start.sh
+
+WORKDIR /workspace
 
 # 声明服务器数据卷，用于持久化世界、插件等数据
 VOLUME /workspace
