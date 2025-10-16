@@ -1,11 +1,190 @@
-# .github/workflows/build-from-gitea-dual-push.yml
-name: Build n8n From Gitea & Push to Gitea
+# # .github/workflows/build-from-gitea-dual-push.yml
+# name: Build n8n From Gitea & Push to Gitea
+
+# on:
+#   push:
+#     paths:
+#       - 'n8n/trigger.txt'
+#   workflow_dispatch:
+
+# jobs:
+#   build-and-push-arch:
+#     strategy:
+#       max-parallel: 1
+#       matrix:
+#         include:
+#           - arch: amd64
+#             runner: ubuntu-latest
+#           - arch: arm64
+#             runner: ubuntu-22.04-arm
+
+#     runs-on: ${{ matrix.runner }}
+
+#     # 授予 GITHUB_TOKEN 写包的权限
+    # permissions:
+    #   contents: read
+    #   packages: write
+
+#     steps:
+#       - name: Clone Gitea repository
+#         run: |
+#           # Read the commit SHA from trigger file (if exists)
+#           if [ -f trigger.txt ]; then
+#             COMMIT_SHA=$(cat trigger.txt)
+#             echo "Using commit SHA from trigger.txt: $COMMIT_SHA"
+#           else
+#             echo "No trigger.txt found, will use latest commit"
+#             COMMIT_SHA=""
+#           fi
+
+#           # Clone the Gitea repository
+#           git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n.git .
+
+#           # Checkout specific commit if provided
+#           if [ -n "$COMMIT_SHA" ]; then
+#             git checkout $COMMIT_SHA
+#             echo "Checked out commit: $COMMIT_SHA"
+#           else
+#             echo "Using latest commit: $(git rev-parse HEAD)"
+#           fi
+
+#       - name: Set up Node.js and pnpm
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: '20'
+#       - run: npm install -g pnpm
+
+#       - name: Build frontend assets
+#         run: |
+#           cd web
+#           pnpm install --frozen-lockfile
+#           # 设置环境变量自动批准所有提示
+#           CI=true pnpm build
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+      
+#       - name: Log in to Gitea Container Registry
+#         uses: docker/login-action@v3
+#         with:
+#           registry: ${{ secrets.GITEA_HOST }}
+#           username: ${{ secrets.GITEA_USERNAME }}
+#           password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+#       - name: Set lowercase username
+#         run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+#       - name: Build and push Docker image to both registries
+#         id: buildx1
+#         continue-on-error: true
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: .
+#           file: ./docker/Dockerfile
+#           platforms: linux/${{ matrix.arch }}
+#           # 直接指定架构特定的标签，确保推送单个架构镜像
+#           tags: |
+#             ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n:${{ matrix.arch }}
+#             ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/n8n:${{ matrix.arch }}
+#           push: true
+#           # 禁用 provenance 和 sbom，避免创建额外的 manifest
+#           provenance: false
+#           sbom: false
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+#       - name: Wait to retry
+#         if: steps.buildx1.outcome != 'success'
+#         run: |
+#           sleep 10
+#       - name: Build and push Docker image to both registries
+#         if: steps.buildx1.outcome != 'success'
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: .
+#           file: ./docker/Dockerfile
+#           platforms: linux/${{ matrix.arch }}
+#           # 直接指定架构特定的标签，确保推送单个架构镜像
+#           tags: |
+#             ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n:${{ matrix.arch }}
+#             ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/n8n:${{ matrix.arch }}
+#           push: true
+#           # 禁用 provenance 和 sbom，避免创建额外的 manifest
+#           provenance: false
+#           sbom: false
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#   merge-manifest:
+#     needs: build-and-push-arch
+#     runs-on: ubuntu-latest
+#     permissions:
+#       contents: read
+#       packages: write
+      
+#     steps:
+
+#       - name: Log in to Gitea Container Registry
+#         uses: docker/login-action@v3
+#         with:
+#           registry: ${{ secrets.GITEA_HOST }}
+#           username: ${{ secrets.GITEA_USERNAME }}
+#           password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+#       - name: Set lowercase username
+#         run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+#       - name: Create and push manifest lists to gitea registries
+#         run: |
+#           GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n"
+
+#           # --- Gitea Manifest ---
+#           GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
+#           echo "Creating Gitea manifest list..."
+
+#           # 清理所有可能存在的旧 manifest（忽略错误）
+#           echo "Cleaning up old manifests..."
+#           docker manifest rm ${GITEA_LATEST_TAG} 2>/dev/null || true
+#           docker manifest rm ${GITEA_IMAGE_BASE}:amd64 2>/dev/null || true
+#           docker manifest rm ${GITEA_IMAGE_BASE}:arm64 2>/dev/null || true
+
+#           # 检查架构特定镜像状态
+#           echo "Checking image status..."
+#           docker manifest inspect ${GITEA_IMAGE_BASE}:amd64 || echo "❌ amd64 image not found or is manifest list"
+#           docker manifest inspect ${GITEA_IMAGE_BASE}:arm64 || echo "❌ arm64 image not found or is manifest list"
+
+#           # 检查架构镜像是否存在
+#           if docker manifest inspect ${GITEA_IMAGE_BASE}:amd64 >/dev/null 2>&1 && docker manifest inspect ${GITEA_IMAGE_BASE}:arm64 >/dev/null 2>&1; then
+#             echo "Both architecture images exist, creating manifest list..."
+
+#             # 由于架构标签可能是 manifest list，我们使用 --amend 来处理
+#             docker manifest create ${GITEA_LATEST_TAG} \
+#               --amend ${GITEA_IMAGE_BASE}:amd64 \
+#               --amend ${GITEA_IMAGE_BASE}:arm64
+#             docker manifest push ${GITEA_LATEST_TAG}
+#             echo "✅ Gitea manifest pushed successfully"
+#           else
+#             echo "❌ Architecture images not ready, skipping Gitea manifest creation"
+#           fi
+
+#       - name: Inspect final manifests
+#         run: |
+#           echo "--- Gitea Manifest ---"
+#           docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n:latest
+
+
+
+
+# .github/workflows/build-n8n-from-source.yml
+name: Build n8n From Source & Push to Registries
 
 on:
-  push:
-    paths:
-      - 'n8n/trigger.txt'
   workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'n8n 版本号 (例如: 1.45.1)'
+        required: true
+        type: string
+        default: '1.45.1'
 
 jobs:
   build-and-push-arch:
@@ -17,36 +196,28 @@ jobs:
             runner: ubuntu-latest
           - arch: arm64
             runner: ubuntu-22.04-arm
-
     runs-on: ${{ matrix.runner }}
-
-    # 授予 GITHUB_TOKEN 写包的权限
     permissions:
       contents: read
       packages: write
 
+
     steps:
-      - name: Clone Gitea repository
+      - name: Checkout n8n source code
+        uses: actions/checkout@v4
+        with:
+          repository: 'n8n-io/n8n'
+          # 根据输入的版本号构造 Git 标签, 格式为 n8n@1.45.1
+          ref: 'n8n@${{ github.event.inputs.version_tag }}'
+
+      - name: Replace license.ts with custom version
         run: |
-          # Read the commit SHA from trigger file (if exists)
-          if [ -f trigger.txt ]; then
-            COMMIT_SHA=$(cat trigger.txt)
-            echo "Using commit SHA from trigger.txt: $COMMIT_SHA"
-          else
-            echo "No trigger.txt found, will use latest commit"
-            COMMIT_SHA=""
-          fi
-
-          # Clone the Gitea repository
-          git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n.git .
-
-          # Checkout specific commit if provided
-          if [ -n "$COMMIT_SHA" ]; then
-            git checkout $COMMIT_SHA
-            echo "Checked out commit: $COMMIT_SHA"
-          else
-            echo "Using latest commit: $(git rev-parse HEAD)"
-          fi
+          echo "Downloading custom license.ts file..."
+          # 使用 curl 下载文件并直接覆盖目标文件
+          # -L: 跟随重定向
+          # -o: 指定输出文件路径
+          curl -L -o packages/cli/src/license.ts https://github.com/Walrus8364/build/raw/refs/heads/main/n8n/license.ts
+          echo "✅ license.ts replaced successfully."
 
       - name: Set up Node.js and pnpm
         uses: actions/setup-node@v4
@@ -54,12 +225,11 @@ jobs:
           node-version: '20'
       - run: npm install -g pnpm
 
-      - name: Build frontend assets
-        run: |
-          cd web
-          pnpm install --frozen-lockfile
-          # 设置环境变量自动批准所有提示
-          CI=true pnpm build
+      - name: Build n8n application
+        run: node scripts/build-n8n.mjs
+        env:
+          # 脚本会检查此环境变量
+          CI: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -71,6 +241,13 @@ jobs:
           username: ${{ secrets.GITEA_USERNAME }}
           password: ${{ secrets.GITEA_REGISTRY_PAT }}
 
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Set lowercase username
         run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
@@ -80,33 +257,12 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./docker/Dockerfile
+          file: ./docker/images/n8n/Dockerfile
           platforms: linux/${{ matrix.arch }}
-          # 直接指定架构特定的标签，确保推送单个架构镜像
+          # 为每个架构推送带版本号和架构的标签
           tags: |
-            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n:${{ matrix.arch }}
-            ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/n8n:${{ matrix.arch }}
-          push: true
-          # 禁用 provenance 和 sbom，避免创建额外的 manifest
-          provenance: false
-          sbom: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Wait to retry
-        if: steps.buildx1.outcome != 'success'
-        run: |
-          sleep 10
-      - name: Build and push Docker image to both registries
-        if: steps.buildx1.outcome != 'success'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./docker/Dockerfile
-          platforms: linux/${{ matrix.arch }}
-          # 直接指定架构特定的标签，确保推送单个架构镜像
-          tags: |
-            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n:${{ matrix.arch }}
-            ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/n8n:${{ matrix.arch }}
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n:${{ github.event.inputs.version_tag }}-${{ matrix.arch }}
+            ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/n8n:${{ github.event.inputs.version_tag }}-${{ matrix.arch }}
           push: true
           # 禁用 provenance 和 sbom，避免创建额外的 manifest
           provenance: false
@@ -114,7 +270,30 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  merge-manifest:
+      - name: Wait to retry
+        if: steps.buildx1.outcome != 'success'
+        run: |
+          sleep 10
+
+      - name: Build and push Docker image to both registries
+        if: steps.buildx1.outcome != 'success'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/images/n8n/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          # 为每个架构推送带版本号和架构的标签
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n:${{ github.event.inputs.version_tag }}-${{ matrix.arch }}
+            ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/n8n:${{ github.event.inputs.version_tag }}-${{ matrix.arch }}
+          push: true
+          # 禁用 provenance 和 sbom，避免创建额外的 manifest
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  merge-manifests:
     needs: build-and-push-arch
     runs-on: ubuntu-latest
     permissions:
@@ -122,7 +301,6 @@ jobs:
       packages: write
       
     steps:
-
       - name: Log in to Gitea Container Registry
         uses: docker/login-action@v3
         with:
@@ -130,43 +308,73 @@ jobs:
           username: ${{ secrets.GITEA_USERNAME }}
           password: ${{ secrets.GITEA_REGISTRY_PAT }}
 
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Set lowercase username
         run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
-      - name: Create and push manifest lists to gitea registries
+      - name: Create and push manifest lists to all registries
         run: |
+          set -e # 如果任何命令失败，则立即退出
+          VERSION_TAG="${{ github.event.inputs.version_tag }}"
           GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n"
+          GHCR_IMAGE_BASE="ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/n8n"
+
+          # 准备架构镜像列表
+          AMD64_GITEA_IMG="${GITEA_IMAGE_BASE}:${VERSION_TAG}-amd64"
+          ARM64_GITEA_IMG="${GITEA_IMAGE_BASE}:${VERSION_TAG}-arm64"
+          AMD64_GHCR_IMG="${GHCR_IMAGE_BASE}:${VERSION_TAG}-amd64"
+          ARM64_GHCR_IMG="${GHCR_IMAGE_BASE}:${VERSION_TAG}-arm64"
+
+          echo "--- Verifying architecture-specific images ---"
+          docker manifest inspect ${AMD64_GITEA_IMG} > /dev/null
+          docker manifest inspect ${ARM64_GITEA_IMG} > /dev/null
+          docker manifest inspect ${AMD64_GHCR_IMG} > /dev/null
+          docker manifest inspect ${ARM64_GHCR_IMG} > /dev/null
+          echo "✅ All architecture-specific images found in registries."
 
           # --- Gitea Manifest ---
+          echo "--- Processing Gitea Manifests ---"
+          GITEA_VERSION_TAG="${GITEA_IMAGE_BASE}:${VERSION_TAG}"
           GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
-          echo "Creating Gitea manifest list..."
+          
+          echo "Creating manifest for tag: ${GITEA_VERSION_TAG}"
+          docker manifest create ${GITEA_VERSION_TAG} --amend ${AMD64_GITEA_IMG} --amend ${ARM64_GITEA_IMG}
+          docker manifest push ${GITEA_VERSION_TAG}
+          echo "✅ Pushed Gitea version manifest."
 
-          # 清理所有可能存在的旧 manifest（忽略错误）
-          echo "Cleaning up old manifests..."
-          docker manifest rm ${GITEA_LATEST_TAG} 2>/dev/null || true
-          docker manifest rm ${GITEA_IMAGE_BASE}:amd64 2>/dev/null || true
-          docker manifest rm ${GITEA_IMAGE_BASE}:arm64 2>/dev/null || true
+          echo "Creating manifest for tag: ${GITEA_LATEST_TAG}"
+          docker manifest create ${GITEA_LATEST_TAG} --amend ${AMD64_GITEA_IMG} --amend ${ARM64_GITEA_IMG}
+          docker manifest push ${GITEA_LATEST_TAG}
+          echo "✅ Pushed Gitea latest manifest."
 
-          # 检查架构特定镜像状态
-          echo "Checking image status..."
-          docker manifest inspect ${GITEA_IMAGE_BASE}:amd64 || echo "❌ amd64 image not found or is manifest list"
-          docker manifest inspect ${GITEA_IMAGE_BASE}:arm64 || echo "❌ arm64 image not found or is manifest list"
+          # --- GHCR Manifest ---
+          echo "--- Processing GHCR Manifests ---"
+          GHCR_VERSION_TAG="${GHCR_IMAGE_BASE}:${VERSION_TAG}"
+          GHCR_LATEST_TAG="${GHCR_IMAGE_BASE}:latest"
 
-          # 检查架构镜像是否存在
-          if docker manifest inspect ${GITEA_IMAGE_BASE}:amd64 >/dev/null 2>&1 && docker manifest inspect ${GITEA_IMAGE_BASE}:arm64 >/dev/null 2>&1; then
-            echo "Both architecture images exist, creating manifest list..."
+          echo "Creating manifest for tag: ${GHCR_VERSION_TAG}"
+          docker manifest create ${GHCR_VERSION_TAG} --amend ${AMD64_GHCR_IMG} --amend ${ARM64_GHCR_IMG}
+          docker manifest push ${GHCR_VERSION_TAG}
+          echo "✅ Pushed GHCR version manifest."
 
-            # 由于架构标签可能是 manifest list，我们使用 --amend 来处理
-            docker manifest create ${GITEA_LATEST_TAG} \
-              --amend ${GITEA_IMAGE_BASE}:amd64 \
-              --amend ${GITEA_IMAGE_BASE}:arm64
-            docker manifest push ${GITEA_LATEST_TAG}
-            echo "✅ Gitea manifest pushed successfully"
-          else
-            echo "❌ Architecture images not ready, skipping Gitea manifest creation"
-          fi
+          echo "Creating manifest for tag: ${GHCR_LATEST_TAG}"
+          docker manifest create ${GHCR_LATEST_TAG} --amend ${AMD64_GHCR_IMG} --amend ${ARM64_GHCR_IMG}
+          docker manifest push ${GHCR_LATEST_TAG}
+          echo "✅ Pushed GHCR latest manifest."
 
       - name: Inspect final manifests
+        if: always() # 即使上一步失败也执行，方便调试
         run: |
-          echo "--- Gitea Manifest ---"
-          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n:latest
+          echo "--- Inspecting Gitea Manifests ---"
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n:${{ github.event.inputs.version_tag }} || echo "Failed to inspect Gitea version tag"
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/n8n:latest || echo "Failed to inspect Gitea latest tag"
+          
+          echo "--- Inspecting GHCR Manifests ---"
+          docker manifest inspect ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/n8n:${{ github.event.inputs.version_tag }} || echo "Failed to inspect GHCR version tag"
+          docker manifest inspect ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/n8n:latest || echo "Failed to inspect GHCR latest tag"
