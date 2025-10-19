@@ -66,7 +66,7 @@ jobs:
           go mod edit -replace=gorilla=./src/gorilla
           go mod tidy
           cd wsproxy/
-          GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o ../../wsproxy-${{ matrix.arch }} .
+          GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o ../wsproxy-${{ matrix.arch }} .
           echo "Binary built successfully at top level: wsproxy-${{ matrix.arch }}"
           
       - name: Upload Binary to Gitea Release
@@ -114,8 +114,8 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           tags: |
             ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
-            # --- 推送到 GHCR 的标签（已注释） ---
-            # ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
+          # --- 推送到 GHCR 的标签（已注释） ---
+          # ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
           push: true
           # 禁用 provenance 和 sbom，避免创建额外的 manifest
           provenance: false
@@ -136,8 +136,8 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           tags: |
             ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
-            # --- 推送到 GHCR 的标签（已注释） ---
-            # ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
+          # --- 推送到 GHCR 的标签（已注释） ---
+          # ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
           push: true
           # 禁用 provenance 和 sbom，避免创建额外的 manifest
           provenance: false
