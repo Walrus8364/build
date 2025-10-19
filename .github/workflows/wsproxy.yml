@@ -50,11 +50,11 @@ jobs:
         run: |
           set -e
           echo "Starting Go build process..."
-          cd app
           cd src/crypto/aes256cbc/ && go mod init crypto/aes256cbc
           cd ../../gologger/ && go mod init gologger
           cd ../proxyproto/ && go mod init proxyproto
           cd ../gorilla/ && go mod init gorilla
+          # 返回wsproxy主目录下
           cd ../..
           go mod init wsproxy-project
           go mod edit -replace=crypto/aes256cbc=./src/crypto/aes256cbc
