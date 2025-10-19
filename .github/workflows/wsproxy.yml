@@ -75,11 +75,10 @@ jobs:
           # 正确的参数名
           server_url: https://${{ secrets.GITEA_HOST }}
           repository: ${{ secrets.GITEA_USERNAME }}/wsproxy
-          token: ${{ secrets.GITEA_API_TOKEN }}
+          token: ${{ secrets.GITEA_REGISTRY_PAT }}
           tag_name: ${{ steps.get_tag.outputs.tag }}
           name: Release ${{ steps.get_tag.outputs.tag }}
           files: ./wsproxy-${{ matrix.arch }}
-          target_commitish: ${{ needs.build-push-and-release.outputs.sha }}
           # 以下参数根据您的需求可以添加
           # draft: false
           # prerelease: false
