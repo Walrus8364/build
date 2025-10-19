@@ -3,7 +3,7 @@ name: Build wsproxy, Create Release & Push Tagged Image
 on:
   push:
     paths:
-      - 'wsproxy/trigger.txt  '
+      - 'wsproxy/trigger.txt'
   workflow_dispatch:
 
 jobs:
