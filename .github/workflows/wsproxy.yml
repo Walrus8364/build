@@ -1,0 +1,232 @@
+# .github/workflows/build-wsproxy-with-tags.yml
+name: Build wsproxy, Create Release & Push Tagged Image
+on:
+  push:
+    paths:
+      - 'wsproxy/trigger.txt  '
+  workflow_dispatch:
+
+jobs:
+  build-push-and-release:
+    strategy:
+      max-parallel: 1
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      # packages: write
+    
+    # 将 git tag 作为 job 的输出，传递给下一个 job
+    outputs:
+      tag: ${{ steps.get_tag.outputs.tag }}
+
+    steps:
+      - name: Clone Gitea repository
+        run: |
+          git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/wsproxy.git .
+          # 获取所有 tags
+          git fetch --tags
+          echo "Cloned latest commit: $(git rev-parse HEAD)"
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          # 获取最新的 tag 作为 release 和镜像版本号
+          TAG=$(git describe --tags --abbrev=0)
+          echo "Latest tag is: $TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Go binary for ${{ matrix.arch }}
+        run: |
+          set -e
+          echo "Starting Go build process..."
+          cd app
+          cd src/crypto/aes256cbc/ && go mod init crypto/aes256cbc
+          cd ../../gologger/ && go mod init gologger
+          cd ../proxyproto/ && go mod init proxyproto
+          cd ../gorilla/ && go mod init gorilla
+          cd ../..
+          go mod init wsproxy-project
+          go mod edit -replace=crypto/aes256cbc=./src/crypto/aes256cbc
+          go mod edit -replace=gologger=./src/gologger
+          go mod edit -replace=proxyproto=./src/proxyproto
+          go mod edit -replace=gorilla=./src/gorilla
+          go mod tidy
+          cd wsproxy/
+          GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o ../../wsproxy-${{ matrix.arch }} .
+          echo "Binary built successfully at top level: wsproxy-${{ matrix.arch }}"
+          
+      - name: Upload Binary to Gitea Release
+        uses: wangca/gitea-release@v1
+        with:
+          gitea_url: https://${{ secrets.GITEA_HOST }}
+          gitea_token: ${{ secrets.GITEA_API_TOKEN }} 
+          gitea_owner: ${{ secrets.GITEA_USERNAME }}
+          gitea_repo: wsproxy
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          upload_assets: ./wsproxy-${{ matrix.arch }}
+          is_create: true
+          is_delete: false 
+          is_overwrite: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      # --- GitHub Container Registry 登录（已注释） ---
+      # - name: Log in to GitHub Container Registry
+      #   uses: docker/login-action@v3
+      #   with:
+      #     registry: ghcr.io
+      #     username: ${{ github.actor }}
+      #     password: ${{ secrets.GITHUB_TOKEN }}
+      
+      # - name: Set lowercase username
+      #   run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      
+      - name: Build and push Docker image to Gitea Registry
+        id: buildx1
+        continue-on-error: true
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./bin/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
+            # --- 推送到 GHCR 的标签（已注释） ---
+            # ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
+          push: true
+          # 禁用 provenance 和 sbom，避免创建额外的 manifest
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Wait to retry
+        if: steps.buildx1.outcome != 'success'
+        run: sleep 10
+
+      - name: Build and push Docker image (Retry)
+        if: steps.buildx1.outcome != 'success'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./bin/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
+            # --- 推送到 GHCR 的标签（已注释） ---
+            # ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
+          push: true
+          # 禁用 provenance 和 sbom，避免创建额外的 manifest
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  merge-manifest:
+    # 依赖于上一个 job，这样才能获取它的输出
+    needs: build-push-and-release
+    # 仅当上一个 job 成功时才运行
+    if: needs.build-push-and-release.result == 'success'
+    runs-on: ubuntu-latest
+    # permissions:
+    #   contents: read
+    #   packages: write
+      
+    steps:
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+          
+      # --- GitHub Container Registry 登录（已注释） ---
+      # - name: Log in to GitHub Container Registry
+      #   uses: docker/login-action@v3
+      #   with:
+      #     registry: ghcr.io
+      #     username: ${{ github.actor }}
+      #     password: ${{ secrets.GITHUB_TOKEN }}
+      
+      # - name: Set lowercase username
+      #   run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      
+      - name: Create and push Gitea manifest lists (versioned and latest)
+        run: |
+          # 从上一个 job 获取版本号
+          VERSION_TAG="${{ needs.build-push-and-release.outputs.tag }}"
+          echo "Using version tag: $VERSION_TAG"
+
+          GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/wsproxy"
+          GITEA_VERSIONED_TAG="${GITEA_IMAGE_BASE}:${VERSION_TAG}"
+          GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
+          
+          # 清理可能存在的旧 manifest，忽略错误
+          echo "Cleaning up old manifests..."
+          docker manifest rm ${GITEA_VERSIONED_TAG} 2>/dev/null || true
+          docker manifest rm ${GITEA_LATEST_TAG} 2>/dev/null || true
+          
+          # --- 创建并推送版本化 manifest ---
+          echo "Creating Gitea manifest list for tag: ${GITEA_VERSIONED_TAG}"
+          docker manifest create ${GITEA_VERSIONED_TAG} \
+            --amend ${GITEA_IMAGE_BASE}:${VERSION_TAG}-amd64 \
+            --amend ${GITEA_IMAGE_BASE}:${VERSION_TAG}-arm64
+          docker manifest push ${GITEA_VERSIONED_TAG}
+          echo "✅ Gitea versioned manifest pushed successfully"
+
+          # --- 创建并推送 latest manifest ---
+          echo "Creating Gitea manifest list for tag: ${GITEA_LATEST_TAG}"
+          docker manifest create ${GITEA_LATEST_TAG} \
+            --amend ${GITEA_IMAGE_BASE}:${VERSION_TAG}-amd64 \
+            --amend ${GITEA_IMAGE_BASE}:${VERSION_TAG}-arm64
+          docker manifest push ${GITEA_LATEST_TAG}
+          echo "✅ Gitea latest manifest pushed successfully"
+      
+      # --- GitHub Manifest 创建（已注释） ---
+      # - name: Create and push GitHub manifest lists
+      #   run: |
+      #     VERSION_TAG="${{ needs.build-push-and-release.outputs.tag }}"
+      #     GHCR_IMAGE_BASE="ghcr.io/${{ env.GITHUB_ACTOR_LOWER }}/wsproxy"
+      #     GHCR_VERSIONED_TAG="${GHCR_IMAGE_BASE}:${VERSION_TAG}"
+      #     GHCR_LATEST_TAG="${GHCR_IMAGE_BASE}:latest"
+      #     
+      #     docker manifest rm ${GHCR_VERSIONED_TAG} 2>/dev/null || true
+      #     docker manifest rm ${GHCR_LATEST_TAG} 2>/dev/null || true
+      #
+      #     docker manifest create ${GHCR_VERSIONED_TAG} \
+      #       --amend ${GHCR_IMAGE_BASE}:${VERSION_TAG}-amd64 \
+      #       --amend ${GHCR_IMAGE_BASE}:${VERSION_TAG}-arm64
+      #     docker manifest push ${GHCR_VERSIONED_TAG}
+      #
+      #     docker manifest create ${GHCR_LATEST_TAG} \
+      #       --amend ${GHCR_IMAGE_BASE}:${VERSION_TAG}-amd64 \
+      #       --amend ${GHCR_IMAGE_BASE}:${VERSION_TAG}-arm64
+      #     docker manifest push ${GHCR_LATEST_TAG}
+      #     echo "✅ GitHub manifests pushed successfully"
+
+      - name: Inspect final Gitea manifests
+        run: |
+          VERSION_TAG="${{ needs.build-push-and-release.outputs.tag }}"
+          echo "--- Gitea Versioned Manifest (${VERSION_TAG}) ---"
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/wsproxy:${VERSION_TAG}
+          echo "--- Gitea Latest Manifest ---"
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/wsproxy:latest
