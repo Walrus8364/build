@@ -110,8 +110,10 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./bin/Dockerfile
+          file: ./Dockerfile
           platforms: linux/${{ matrix.arch }}
+          build-args: |
+            BINARY_NAME=wsproxy-${{ matrix.arch }}
           tags: |
             ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
           # --- 推送到 GHCR 的标签（已注释） ---
@@ -134,6 +136,8 @@ jobs:
           context: .
           file: ./bin/Dockerfile
           platforms: linux/${{ matrix.arch }}
+          build-args: |
+            BINARY_NAME=wsproxy-${{ matrix.arch }}
           tags: |
             ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/wsproxy:${{ steps.get_tag.outputs.tag }}-${{ matrix.arch }}
           # --- 推送到 GHCR 的标签（已注释） ---
