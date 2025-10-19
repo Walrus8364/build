@@ -67,22 +67,18 @@ jobs:
           echo "Binary built successfully at top level: wsproxy-${{ matrix.arch }}"
           
       - name: Upload Binary to Gitea Release
-        uses: akkuman/gitea-release-action@v1.3.1
+        uses: akkuman/gitea-release-action@v1
         with:
-          # 必需：Gitea API Token
-          gitea_token: ${{ secrets.GITEA_API_TOKEN }}
-          # 必需：Gitea 实例的 URL
-          gitea_url: https://${{ secrets.GITEA_HOST }}
-          # 必需：仓库名称，格式为 owner/repo
-          gitea_repo: ${{ secrets.GITEA_USERNAME }}/wsproxy
-          # 必需：要上传到的 Git 标签
+          # 正确的参数名
+          server_url: https://${{ secrets.GITEA_HOST }}
+          repository: ${{ secrets.GITEA_USERNAME }}/wsproxy
+          token: ${{ secrets.GITEA_API_TOKEN }}
           tag_name: ${{ steps.get_tag.outputs.tag }}
-          # 必需：要上传的文件路径
-          asset_path: ./wsproxy-${{ matrix.arch }}
-          # 可选：Release 的标题，如果不提供，默认为 tag_name
-          release_name: Release ${{ steps.get_tag.outputs.tag }}
-          # 可选：如果文件已存在，则覆盖
-          overwrite: true
+          name: Release ${{ steps.get_tag.outputs.tag }}
+          files: ./wsproxy-${{ matrix.arch }}
+          # 以下参数根据您的需求可以添加
+          # draft: false
+          # prerelease: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
