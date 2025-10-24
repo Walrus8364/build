@@ -1,0 +1,57 @@
+# .github/workflows/build-LinuxDoInterceptor-with-tags.yml
+name: Build LinuxDoInterceptor, Create Release
+on:
+  push:
+    paths:
+      - 'LinuxDoInterceptor/trigger.txt'
+  workflow_dispatch:
+jobs:
+  build-and-release:
+    # Java 的 jar 包是跨平台的，因此不需要为不同架构分别构建。
+    # 我们移除了构建矩阵，只在一个标准的 runner 上运行。
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    # 将 git tag 作为 job 的输出，以供后续步骤（如 release）使用
+    outputs:
+      tag: ${{ steps.get_tag.outputs.tag }}
+      
+    steps:
+      - name: Clone Gitea repository
+        id: clone_repo
+        run: |
+          git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/LinuxDoInterceptor.git .
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          # 获取最新的 tag 作为 release 版本号
+          TAG=$(git describe --tags --abbrev=0)
+          echo "Latest tag is: $TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn clean package
+          
+      - name: Upload Artifact to Gitea Release
+        uses: akkuman/gitea-release-action@v1
+        with:
+          server_url: https://${{ secrets.GITEA_HOST }}
+          # **重要**：确保仓库名称正确
+          repository: ${{ secrets.GITEA_USERNAME }}/LinuxDoInterceptor
+          token: ${{ secrets.GITEA_REGISTRY_PAT }} # 确认这个 PAT 有创建 Release 的权限
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: Release ${{ steps.get_tag.outputs.tag }}
+          # 上传我们准备好的、不带版本号的 jar 文件
+          files: ./target/linuxdointerceptor-${{ steps.get_tag.outputs.tag }}.jar
+          # 以下参数根据您的需求可以添加
+          # draft: false
+          # prerelease: false
