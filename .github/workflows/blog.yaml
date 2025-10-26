@@ -152,4 +152,4 @@ jobs:
             -H "Content-Type: application/json" \
             -H "X-Deploy-Token: ${{ secrets.DEPLOY_BLOG_WEBHOOK_SECRET }}" \
             -d '{}' \
-            ${{ secrets.WEBHOOKD_URL }}/redeploy-blog
+            ${{ secrets.WEBHOOKD_URL }}/deploy_blog
