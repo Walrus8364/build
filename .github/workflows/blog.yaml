@@ -60,7 +60,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           # 直接指定架构特定的标签，确保推送单个架构镜像
           tags: |
-            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/Blog:${{ matrix.arch }}
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/blog:${{ matrix.arch }}
           push: true
           # 禁用 provenance 和 sbom，避免创建额外的 manifest
           provenance: false
@@ -80,7 +80,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           # 直接指定架构特定的标签，确保推送单个架构镜像
           tags: |
-            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/Blog:${{ matrix.arch }}
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/blog:${{ matrix.arch }}
           push: true
           # 禁用 provenance 和 sbom，避免创建额外的 manifest
           provenance: false
@@ -109,7 +109,7 @@ jobs:
 
       - name: Create and push manifest lists to both registries
         run: |
-          GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/Blog"
+          GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/blog"
 
           # --- Gitea Manifest ---
           GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
@@ -143,4 +143,13 @@ jobs:
       - name: Inspect final manifests
         run: |
           echo "--- Gitea Manifest ---"
-          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/Blog:latest
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/blog:latest
+
+      - name: Trigger Server Deployment
+        if: success()
+        run: |
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Deploy-Token: ${{ secrets.DEPLOY_BLOG_WEBHOOK_SECRET }}" \
+            -d '{}' \
+            ${{ secrets.WEBHOOKD_URL }}/redeploy-blog
