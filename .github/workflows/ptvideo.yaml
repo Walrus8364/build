@@ -25,7 +25,8 @@ jobs:
       - name: Clone Gitea repository
         uses: actions/checkout@v5
         with:
-          repository: ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/PT-Video-Editing-Tools.git
+          github-server-url: ${{ secrets.GITEA_HOST }}
+          repository: ${{ secrets.GITEA_USERNAME }}/PT-Video-Editing-Tools
           token: ${{ secrets.GITEA_CODE_PAT }}
           lfs: true
 
