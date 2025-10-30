@@ -1,0 +1,136 @@
+name: Build PT Video From Gitea & Push to Gitea
+
+on:
+  push:
+    paths:
+      - 'PTVideo/trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  build-and-push-arch:
+    strategy:
+      max-parallel: 1
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    outputs:
+      tag: ${{ steps.get_tag.outputs.tag }}
+
+    steps:
+      - name: Clone Gitea repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/PT-Video-Editing-Tools.git
+          token: ${{ secrets.GITEA_CODE_PAT }}
+          lfs: true
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          # 获取最新的 tag 作为 release 版本号
+          TAG=$(git describe --tags --abbrev=0)
+          echo "Latest tag is: $TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Set lowercase username
+        run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      # 第四步：构建 Docker 镜像 (使用 docker build)
+      - name: Build Docker image
+        id: buildx1
+        continue-on-error: true
+        run: |
+          docker build --no-cache \
+            --tag ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+            --file ./All/Dockerfile-x86-new \
+            ./All
+
+      - name: Wait to retry
+        if: steps.buildx1.outcome != 'success'
+        run: |
+          sleep 10
+
+      - name: Build Docker image
+        run: |
+          docker build --no-cache \
+            --tag ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+            --file ./All/Dockerfile-x86-new \
+            ./All
+
+      # 第五步：推送 Docker 镜像 (使用 docker push)
+      - name: Push Docker image
+        run: |
+          docker push ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+    
+  merge-manifest:
+    needs: build-and-push-arch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      
+    steps:
+
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Set lowercase username
+        run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Create and push manifest lists to both registries
+        run: |
+          VERSION_TAG="${{ needs.build-and-push-arch.outputs.tag }}"
+          GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo"
+
+          # --- Gitea Manifest ---
+          GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
+          echo "Creating Gitea manifest list..."
+
+          # 清理所有可能存在的旧 manifest（忽略错误）
+          echo "Cleaning up old manifests..."
+          docker manifest rm ${GITEA_LATEST_TAG} 2>/dev/null || true
+          docker manifest rm ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} 2>/dev/null || true
+          docker manifest rm ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG} 2>/dev/null || true
+
+          # 检查架构特定镜像状态
+          echo "Checking image status..."
+          docker manifest inspect ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} || echo "❌ amd64 image not found or is manifest list"
+          docker manifest inspect ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG} || echo "❌ arm64 image not found or is manifest list"
+
+          # 检查架构镜像是否存在
+          if docker manifest inspect ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} >/dev/null 2>&1 && docker manifest inspect ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG} >/dev/null 2>&1; then
+            echo "Both architecture images exist, creating manifest list..."
+
+            # 由于架构标签可能是 manifest list，我们使用 --amend 来处理
+            docker manifest create ${GITEA_LATEST_TAG} \
+              --amend ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} \
+              --amend ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG}
+            docker manifest push ${GITEA_LATEST_TAG}
+            echo "✅ Gitea manifest pushed successfully"
+          else
+            echo "❌ Architecture images not ready, skipping Gitea manifest creation"
+          fi
+
+      - name: Inspect final manifests
+        run: |
+          echo "--- Gitea Manifest ---"
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:latest
