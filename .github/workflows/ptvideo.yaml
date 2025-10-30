@@ -53,6 +53,7 @@ jobs:
       # 第四步：构建 Docker 镜像 (使用 docker build)
       - name: Build Docker image
         id: buildx1
+        if: matrix.arch == 'amd64'
         continue-on-error: true
         run: |
           docker build --no-cache \
@@ -61,15 +62,39 @@ jobs:
             ./All
 
       - name: Wait to retry
-        if: steps.buildx1.outcome != 'success'
+        if: matrix.arch == 'amd64' && steps.buildx1.outcome != 'success'
         run: |
           sleep 10
 
       - name: Build Docker image
+        if: matrix.arch == 'amd64'
         run: |
           docker build --no-cache \
             --tag ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
             --file ./All/Dockerfile-x86-new \
+            ./All
+
+      - name: Build Docker image
+        id: buildx1
+        if: matrix.arch == 'arm64'
+        continue-on-error: true
+        run: |
+          docker build --no-cache \
+            --tag ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+            --file ./All/Dockerfile-aarch64-new \
+            ./All
+
+      - name: Wait to retry
+        if: matrix.arch == 'arm64' && steps.buildx1.outcome != 'success'
+        run: |
+          sleep 10
+
+      - name: Build Docker image
+        if: matrix.arch == 'arm64'
+        run: |
+          docker build --no-cache \
+            --tag ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+            --file ./All/Dockerfile-aarch64-new \
             ./All
 
       # 第五步：推送 Docker 镜像 (使用 docker push)
