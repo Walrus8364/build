@@ -29,6 +29,7 @@ jobs:
           repository: ${{ secrets.GITEA_USERNAME }}/PT-Video-Editing-Tools
           token: ${{ secrets.GITEA_CODE_PAT }}
           lfs: true
+          ref: 'main'
 
       - name: Get latest tag
         id: get_tag
