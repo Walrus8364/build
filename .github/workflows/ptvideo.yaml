@@ -75,6 +75,14 @@ jobs:
           registry: ${{ secrets.GITEA_HOST }}
           username: ${{ secrets.GITEA_USERNAME }}
           password: ${{ secrets.GITEA_REGISTRY_PAT }}
+      
+      - name: Configure Docker Daemon
+        run: |
+          sudo mkdir -p /etc/docker
+          echo '{"max-concurrent-uploads": 1}' | sudo tee /etc/docker/daemon.json
+
+      - name: Restart Docker Daemon
+        run: sudo systemctl restart docker
 
       - name: Set lowercase username
         run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
