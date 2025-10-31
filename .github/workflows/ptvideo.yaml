@@ -86,7 +86,7 @@ jobs:
         continue-on-error: true
         run: |
           docker build --no-cache \
-            --tag ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+            --tag ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }} \
             --file ./All/Dockerfile-x86-new \
             ./All
 
@@ -99,7 +99,7 @@ jobs:
         if: matrix.arch == 'amd64'
         run: |
           docker build --no-cache \
-            --tag ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+            --tag ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }} \
             --file ./All/Dockerfile-x86-new \
             ./All
 
