@@ -95,14 +95,15 @@ jobs:
         run: |
           sleep 10
 
-      - name: Build Docker image
-        if: matrix.arch == 'amd64'
+      - name: Build Docker image Again
+        if: matrix.arch == 'amd64' && steps.buildx1.outcome != 'success'
         run: |
           docker build --no-cache \
             --tag ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }} \
             --file ./All/Dockerfile-x86-new \
             ./All
 
+      # 针对 arm64 架构的构建步骤
       - name: Build Docker image
         id: buildx2
         if: matrix.arch == 'arm64'
@@ -118,8 +119,8 @@ jobs:
         run: |
           sleep 10
 
-      - name: Build Docker image
-        if: matrix.arch == 'arm64'
+      - name: Build Docker image Again
+        if: matrix.arch == 'arm64' && steps.buildx2.outcome != 'success'
         run: |
           docker build --no-cache \
             --tag ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
@@ -128,6 +129,18 @@ jobs:
 
       # 第五步：推送 Docker 镜像 (使用 docker push)
       - name: Push Docker image
+        id: push_image
+        continue-on-error: true
+        run: |
+          docker images
+          docker push ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+
+      - name: sleep 10s
+        if: steps.push_image.outcome != 'success'
+        run: sleep 10
+
+      - name: Push Docker image Again
+        if: steps.push_image.outcome != 'success'
         run: |
           docker push ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/ptvideo:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
     
