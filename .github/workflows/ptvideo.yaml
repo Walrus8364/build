@@ -22,14 +22,29 @@ jobs:
       tag: ${{ steps.get_tag.outputs.tag }}
 
     steps:
+      # - name: Clone Gitea repository
+      #   uses: actions/checkout@v5
+      #   with:
+      #     github-server-url: https://${{ secrets.GITEA_HOST }}
+      #     repository: ${{ secrets.GITEA_USERNAME }}/PT-Video-Editing-Tools
+      #     token: ${{ secrets.GITEA_CODE_PAT }}
+      #     lfs: true
+      #     ref: 'main'
+
       - name: Clone Gitea repository
-        uses: actions/checkout@v5
-        with:
-          github-server-url: https://${{ secrets.GITEA_HOST }}
-          repository: ${{ secrets.GITEA_USERNAME }}/PT-Video-Editing-Tools
-          token: ${{ secrets.GITEA_CODE_PAT }}
-          lfs: true
-          ref: 'main'
+        run: |
+          # 配置 Git，使其在克隆时不提示输入密码
+          # 我们将认证信息（用户名和PAT）直接嵌入到URL中
+          GIT_CLONE_URL="https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/PT-Video-Editing-Tools.git"
+          
+          echo "Cloning repository..."
+          # --branch main: 指定克隆 main 分支
+          # ".": 克隆到当前工作目录，这与 actions/checkout 的行为一致
+          git clone --branch main "${GIT_CLONE_URL}" .
+          
+          echo "Pulling LFS files..."
+          # 初始化并拉取 LFS 文件
+          git lfs pull
 
       - name: Get latest tag
         id: get_tag
