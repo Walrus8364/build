@@ -39,7 +39,7 @@ jobs:
           
           echo "Cloning repository..."
           # ".": 克隆到当前工作目录，这与 actions/checkout 的行为一致
-          git clone "${GIT_CLONE_URL}" .
+          git clone --depth 1 "${GIT_CLONE_URL}" .
 
           echo "Pulling LFS files..."
           # 初始化并拉取 LFS 文件
@@ -51,13 +51,11 @@ jobs:
           # 确保拉取 tags（如果 clone 没带 tags）
           git fetch --tags || true
 
-          # 尝试获取最近的 tag；如果没有则返回空字符串（避免脚本因非0退出）
-          TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          # 尝试获取使用最后一个按版本排序的 tag；如果没有则返回空字符串（避免脚本因非0退出）
+          TAG=$(git tag --list | sort -V | tail -n 1)
 
           # 如果仍为空，则尝试从 tag 列表拿最新的（按版本排序），或使用默认 v0.0.0
           if [ -z "$TAG" ]; then
-            # 如果你更喜欢使用最后一个按版本排序的 tag（而不是 git describe），可以启用下面一行：
-            # TAG=$(git tag --list | sort -V | tail -n 1)
             if [ -z "$TAG" ]; then
               TAG="v0.0.0"
             fi
