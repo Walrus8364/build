@@ -74,6 +74,7 @@ jobs:
           echo "Free up disk space complete"
           echo "=============================================================================="
           df -hT
+          sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
           echo "=============================================================================="
 
       - name: Clone Gitea repository
