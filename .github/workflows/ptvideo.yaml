@@ -74,11 +74,11 @@ jobs:
           echo "Free up disk space complete"
           echo "=============================================================================="
           df -hT
+          sudo chown -R $USER:$GROUPS $GITHUB_WORKSPACE
           echo "=============================================================================="
 
       - name: Clone Gitea repository
         run: |
-          sudo chown -R runner:docker /home/runner/work/build/build
           # 清理工作目录
           rm -rf ./*
           rm -rf ./.[!.]*
@@ -128,29 +128,36 @@ jobs:
       - name: Configure Docker Daemon
         run: |
           sudo mkdir -p /etc/docker
-          # 我们告诉 Docker 使用这个空间来存放所有数据（镜像、层等）
-          NEW_DOCKER_ROOT="/home/runner/work/build/build"
-          
+          # 1. 在工作目录下创建一个专门给 Docker 用的子目录
+          NEW_DOCKER_ROOT="/home/runner/work/build/build/docker-data"
+          sudo mkdir -p "$NEW_DOCKER_ROOT"
+
           echo "Configuring Docker to use data root: $NEW_DOCKER_ROOT"
 
-          # 停止 Docker 以便修改配置
+          # 2. 停止 Docker 以便修改配置
           sudo systemctl stop docker
 
-          # 创建配置文件，同时包含新的 data-root 和你之前的并发上传设置
+          # 3. 创建配置文件，指向新的子目录
+          sudo mkdir -p /etc/docker
           echo '{
             "data-root": "'"$NEW_DOCKER_ROOT"'",
             "max-concurrent-uploads": 1
           }' | sudo tee /etc/docker/daemon.json
 
-          # 重启 Docker 使配置生效
+          # 4. 重启 Docker 使配置生效
           sudo systemctl start docker
 
-          # 验证更改是否成功
+          # 5. 验证更改是否成功
           echo "Verifying Docker configuration..."
           docker info | grep "Docker Root Dir"
           
           echo "Checking disk space after reconfiguring Docker..."
           df -hT
+
+          echo "Checking permissions of the working directory..."
+          ls -ld /home/runner/work/build/build
+          echo "Checking permissions of the new Docker root..."
+          ls -ld "$NEW_DOCKER_ROOT"
 
       - name: Set lowercase username
         run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
