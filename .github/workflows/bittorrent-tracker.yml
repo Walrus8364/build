@@ -20,7 +20,7 @@ jobs:
         with:
           version: 10
           run_install: false
-          
+
       - name: Set up Node.js and pnpm
         uses: actions/setup-node@v4
         with:
@@ -28,16 +28,8 @@ jobs:
           cache: 'pnpm'
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Execute Release
-        env:
-          # 环境变量：这是连接 Action 和 semantic-release 插件的桥梁
-          # GITEA_TOKEN 会被 @saithodev/semantic-release-gitea 插件读取
-          # 用来调用 Gitea API 创建 Release 和 Tag
-          GITEA_TOKEN: ${{ secrets.GITEA_PAT }}
-
-          # NPM_TOKEN 会被 @semantic-release/npm 插件读取
-          # 用来向你的 Gitea NPM Registry 发布包
-          NPM_TOKEN: ${{ secrets.GITEA_PAT }}
-        run: npx semantic-release
+        run: |
+          npm set @gitea:registry=https://${{ secrets.GITEA_HOST }}/api/packages/${{ secrets.GITEA_USERNAME }}/npm/
+          npm config set -- '//${{ secrets.GITEA_HOST }}/api/packages/${{ secrets.GITEA_USERNAME }}/npm/:_authToken' "${{ secrets.GITEA_CODE_PAT }}"
+          pnpm install --frozen-lockfile
+          pnpm publish
