@@ -30,6 +30,6 @@ jobs:
       - name: Install dependencies
         run: |
           npm set @gitea:registry=https://${{ secrets.GITEA_HOST }}/api/packages/${{ secrets.GITEA_USERNAME }}/npm/
-          npm config set -- '//${{ secrets.GITEA_HOST }}/api/packages/${{ secrets.GITEA_USERNAME }}/npm/:_authToken' "${{ secrets.GITEA_CODE_PAT }}"
+          npm config set -- '//${{ secrets.GITEA_HOST }}/api/packages/${{ secrets.GITEA_USERNAME }}/npm/:_authToken' "${{ secrets.GITEA_REGISTRY_PAT }}"
           pnpm install --frozen-lockfile
           pnpm publish
