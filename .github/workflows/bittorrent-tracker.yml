@@ -1,0 +1,37 @@
+name: Build bittorrent-tracker From Source & Push to Registries
+
+on:
+  push:
+    paths:
+      - 'bittorrent-tracker/trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  build-and-push-arch:
+    name: Build and Push bittorrent-tracker From Source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Gitea repository
+        run: |
+          git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/bittorrent-tracker.git .
+
+      - name: Set up Node.js and pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Execute Release
+        env:
+          # 环境变量：这是连接 Action 和 semantic-release 插件的桥梁
+          # GITEA_TOKEN 会被 @saithodev/semantic-release-gitea 插件读取
+          # 用来调用 Gitea API 创建 Release 和 Tag
+          GITEA_TOKEN: ${{ secrets.GITEA_PAT }}
+
+          # NPM_TOKEN 会被 @semantic-release/npm 插件读取
+          # 用来向你的 Gitea NPM Registry 发布包
+          NPM_TOKEN: ${{ secrets.GITEA_PAT }}
+        run: npx semantic-release
