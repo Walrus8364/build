@@ -1,0 +1,72 @@
+# .github/workflows/build-go-ipv6-proxy-with-tags.yml
+name: Build go-ipv6-proxy, Create Release & Push Tagged Image
+on:
+  push:
+    paths:
+      - 'go-ipv6-proxy/trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    strategy:
+      max-parallel: 1
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      # packages: write
+    
+    # 将 git tag 作为 job 的输出，传递给下一个 job
+    outputs:
+      tag: ${{ steps.get_tag.outputs.tag }}
+      sha: ${{ steps.clone_repo.outputs.sha }}
+
+    steps:
+      - name: Clone Gitea repository
+        run: |
+          git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/go-ipv6-proxy.git .
+          # 获取所有 tags
+          git fetch --tags
+          sha=$(git rev-parse HEAD)
+          echo "Cloned latest commit: $sha"
+          echo "sha=$sha" >> $GITHUB_OUTPUT
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          # 获取最新的 tag 作为 release 和镜像版本号
+          TAG=$(git describe --tags --abbrev=0)
+          echo "Latest tag is: $TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Go binary for ${{ matrix.arch }}
+        run: |
+          set -e
+          echo "Starting Go build process..."
+        
+          GOOS=linux GOARCH=${{ matrix.arch }} go build -o go-ipv6-proxy-${{ matrix.arch }} .
+          echo "Binary built successfully at top level: go-ipv6-proxy-${{ matrix.arch }}"
+          
+      - name: Upload Binary to Gitea Release
+        uses: akkuman/gitea-release-action@v1
+        with:
+          # 正确的参数名
+          server_url: https://${{ secrets.GITEA_HOST }}
+          repository: ${{ secrets.GITEA_USERNAME }}/go-ipv6-proxy
+          token: ${{ secrets.GITEA_REGISTRY_PAT }}
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: Release ${{ steps.get_tag.outputs.tag }}
+          files: ./go-ipv6-proxy-${{ matrix.arch }}
+          # 以下参数根据您的需求可以添加
+          # draft: false
+          # prerelease: false
