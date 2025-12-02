@@ -1,0 +1,150 @@
+name: Build AIClient-2-API From Gitea & Push to Gitea
+
+on:
+  push:
+    paths:
+      - 'AIClient-2-API/trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  build-and-push-arch:
+    strategy:
+      max-parallel: 2
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+
+    runs-on: ${{ matrix.runner }}
+
+    # 授予 GITHUB_TOKEN 写包的权限
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      tag: ${{ steps.get_tag.outputs.tag }}
+
+    steps:
+      - name: Clone Gitea repository
+        run: |
+          git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/AIClient-2-API.git .
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          # 获取最新的 tag 作为 release 版本号
+          TAG=$(git describe --tags --abbrev=0)
+          echo "Latest tag is: $TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Set lowercase username
+        run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Build and push Docker image to both registries
+        id: buildx1
+        continue-on-error: true
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          # 直接指定架构特定的标签，确保推送单个架构镜像
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/aiclient-2-api:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+          push: true
+          # 禁用 provenance 和 sbom，避免创建额外的 manifest
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Wait to retry
+        if: steps.buildx1.outcome != 'success'
+        run: |
+          sleep 10
+      - name: Build and push Docker image to both registries
+        if: steps.buildx1.outcome != 'success'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          # 直接指定架构特定的标签，确保推送单个架构镜像
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/aiclient-2-api:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+          push: true
+          # 禁用 provenance 和 sbom，避免创建额外的 manifest
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  merge-manifest:
+    needs: build-and-push-arch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      
+    steps:
+
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Set lowercase username
+        run: echo "GITHUB_ACTOR_LOWER=$(echo ${{ github.actor }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Create and push manifest lists to both registries
+        run: |
+          VERSION_TAG="${{ needs.build-and-push-arch.outputs.tag }}"
+          GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/aiclient-2-api"
+
+          # --- Gitea Manifest ---
+          GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
+          echo "Creating Gitea manifest list..."
+
+          # 清理所有可能存在的旧 manifest（忽略错误）
+          echo "Cleaning up old manifests..."
+          docker manifest rm ${GITEA_LATEST_TAG} 2>/dev/null || true
+          docker manifest rm ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} 2>/dev/null || true
+          docker manifest rm ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG} 2>/dev/null || true
+
+          # 检查架构特定镜像状态
+          echo "Checking image status..."
+          docker manifest inspect ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} || echo "❌ amd64 image not found or is manifest list"
+          docker manifest inspect ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG} || echo "❌ arm64 image not found or is manifest list"
+
+          # 检查架构镜像是否存在
+          if docker manifest inspect ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} >/dev/null 2>&1 && docker manifest inspect ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG} >/dev/null 2>&1; then
+            echo "Both architecture images exist, creating manifest list..."
+
+            # 由于架构标签可能是 manifest list，我们使用 --amend 来处理
+            docker manifest create ${GITEA_LATEST_TAG} \
+              --amend ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} \
+              --amend ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG}
+            docker manifest push ${GITEA_LATEST_TAG}
+            echo "✅ Gitea manifest pushed successfully"
+          else
+            echo "❌ Architecture images not ready, skipping Gitea manifest creation"
+          fi
+
+      - name: Inspect final manifests
+        run: |
+          echo "--- Gitea Manifest ---"
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/aiclient-2-api:latest
