@@ -117,6 +117,7 @@ jobs:
 
           # --- Gitea Manifest ---
           GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
+          GITEA_VERSION_TAG="${GITEA_IMAGE_BASE}:${VERSION_TAG}"
           echo "Creating Gitea manifest list..."
 
           # 清理所有可能存在的旧 manifest（忽略错误）
@@ -124,6 +125,7 @@ jobs:
           docker manifest rm ${GITEA_LATEST_TAG} 2>/dev/null || true
           docker manifest rm ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} 2>/dev/null || true
           docker manifest rm ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG} 2>/dev/null || true
+          docker manifest rm ${GITEA_VERSION_TAG} 2>/dev/null || true
 
           # 检查架构特定镜像状态
           echo "Checking image status..."
@@ -139,6 +141,11 @@ jobs:
               --amend ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} \
               --amend ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG}
             docker manifest push ${GITEA_LATEST_TAG}
+
+            docker manifest create ${GITEA_VERSION_TAG} \
+              --amend ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} \
+              --amend ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG}
+            docker manifest push ${GITEA_VERSION_TAG}
             echo "✅ Gitea manifest pushed successfully"
           else
             echo "❌ Architecture images not ready, skipping Gitea manifest creation"
