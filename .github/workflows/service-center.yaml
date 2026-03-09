@@ -1,0 +1,266 @@
+# CI/CD pipeline for service-center Nx monorepo.
+# Three stages: detect affected services → build per-arch images → merge multi-arch manifests.
+name: Build Service-Center From Gitea & Push to Gitea
+
+on:
+  push:
+    paths:
+      - 'service-center/trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  # ── Job 1: Detect which services changed between tags ──────────────
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      affected: ${{ steps.affected.outputs.services }}
+      tag: ${{ steps.tag.outputs.tag }}
+      has_services: ${{ steps.affected.outputs.has_services }}
+    steps:
+      - name: Clone Gitea repository (full history for tag diff)
+        run: |
+          git clone --no-single-branch --no-tags \
+            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/service-center.git" .
+          git fetch --tags --force
+
+      - name: Determine current and previous tags
+        id: tag
+        run: |
+          # Get latest tag (the one that triggered this build)
+          CURRENT_TAG=$(git describe --tags --abbrev=0)
+          echo "tag=${CURRENT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Current tag: ${CURRENT_TAG}"
+
+          # Get previous tag (for diff base)
+          PREV_TAG=$(git tag --sort=-version:refname | sed -n '2p')
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous tag found — first release, will build all services."
+            echo "prev_tag=" >> "$GITHUB_OUTPUT"
+          else
+            echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+            echo "Previous tag: ${PREV_TAG}"
+          fi
+
+          # Checkout the exact tagged commit for deterministic builds
+          git checkout "${CURRENT_TAG}"
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Detect affected services
+        id: affected
+        run: |
+          ALL_BACKEND_SERVICES='["api-gateway","auth-service","exa-service","order-service","payment-service","product-service","user-service"]'
+          PREV_TAG="${{ steps.tag.outputs.prev_tag }}"
+
+          if [ -z "$PREV_TAG" ]; then
+            # First release: build everything
+            echo "services=${ALL_BACKEND_SERVICES}" >> "$GITHUB_OUTPUT"
+            echo "has_services=true" >> "$GITHUB_OUTPUT"
+            echo "First release — building all services."
+            exit 0
+          fi
+
+          CURRENT_TAG="${{ steps.tag.outputs.tag }}"
+
+          # If global build inputs changed, rebuild everything (Nx may not track these)
+          if git diff --name-only "${PREV_TAG}..${CURRENT_TAG}" -- \
+            Dockerfile .dockerignore nx.json package.json pnpm-lock.yaml \
+            pnpm-workspace.yaml tsconfig.base.json tsconfig.json | grep -q .; then
+            echo "Global build inputs changed — building all services."
+            echo "services=${ALL_BACKEND_SERVICES}" >> "$GITHUB_OUTPUT"
+            echo "has_services=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Use Nx to detect affected apps (excludes web since it's in .nxignore)
+          NX_AFFECTED=$(pnpm nx show projects --affected --base="${PREV_TAG}" --head="${CURRENT_TAG}" --type=app 2>/dev/null || true)
+          echo "Nx affected projects: ${NX_AFFECTED}"
+
+          # Check if apps/web/ changed (not tracked by Nx due to .nxignore)
+          WEB_CHANGED=false
+          if git diff --name-only "${PREV_TAG}..${CURRENT_TAG}" -- apps/web/ | grep -q .; then
+            WEB_CHANGED=true
+            echo "Web frontend has changes."
+          fi
+
+          # Build the JSON array of affected backend services
+          SERVICES=()
+          for svc in api-gateway auth-service exa-service order-service payment-service product-service user-service; do
+            if echo "$NX_AFFECTED" | grep -q "^${svc}$"; then
+              SERVICES+=("\"${svc}\"")
+            fi
+          done
+
+          # If web changed, ensure api-gateway is in the list (gateway bundles web)
+          if [ "$WEB_CHANGED" = true ]; then
+            if ! printf '%s\n' "${SERVICES[@]}" | grep -q '"api-gateway"'; then
+              SERVICES+=("\"api-gateway\"")
+              echo "Added api-gateway due to web changes."
+            fi
+          fi
+
+          if [ ${#SERVICES[@]} -eq 0 ]; then
+            echo "No affected services detected."
+            echo "services=[]" >> "$GITHUB_OUTPUT"
+            echo "has_services=false" >> "$GITHUB_OUTPUT"
+          else
+            JSON="[$(IFS=,; echo "${SERVICES[*]}")]"
+            echo "services=${JSON}" >> "$GITHUB_OUTPUT"
+            echo "has_services=true" >> "$GITHUB_OUTPUT"
+            echo "Affected services: ${JSON}"
+          fi
+
+  # ── Job 2: Build & push per-architecture images ────────────────────
+  build-and-push:
+    needs: detect
+    if: needs.detect.outputs.has_services == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(needs.detect.outputs.affected) }}
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Clone Gitea repository and checkout tag
+        run: |
+          git clone \
+            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/service-center.git" .
+          git fetch --tags --force
+          git checkout "${{ needs.detect.outputs.tag }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Determine Docker target
+        id: target
+        run: |
+          if [ "${{ matrix.service }}" = "api-gateway" ]; then
+            echo "target=gateway" >> "$GITHUB_OUTPUT"
+          else
+            echo "target=service" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push (attempt 1)
+        id: buildx1
+        continue-on-error: true
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: ${{ steps.target.outputs.target }}
+          build-args: APP_NAME=${{ matrix.service }}
+          platforms: linux/${{ matrix.arch }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/sc-${{ matrix.service }}:${{ matrix.arch }}-${{ needs.detect.outputs.tag }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=sc-${{ matrix.service }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=sc-${{ matrix.service }}-${{ matrix.arch }}
+
+      - name: Wait before retry
+        if: steps.buildx1.outcome != 'success'
+        run: sleep 10
+
+      - name: Build and push (retry)
+        if: steps.buildx1.outcome != 'success'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: ${{ steps.target.outputs.target }}
+          build-args: APP_NAME=${{ matrix.service }}
+          platforms: linux/${{ matrix.arch }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/sc-${{ matrix.service }}:${{ matrix.arch }}-${{ needs.detect.outputs.tag }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=sc-${{ matrix.service }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=sc-${{ matrix.service }}-${{ matrix.arch }}
+
+  # ── Job 3: Merge multi-arch manifests ──────────────────────────────
+  merge-manifest:
+    needs: [detect, build-and-push]
+    if: needs.detect.outputs.has_services == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(needs.detect.outputs.affected) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Create and push manifest list
+        run: |
+          VERSION_TAG="${{ needs.detect.outputs.tag }}"
+          IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/sc-${{ matrix.service }}"
+
+          LATEST_TAG="${IMAGE_BASE}:latest"
+          VERSION_TAGGED="${IMAGE_BASE}:${VERSION_TAG}"
+
+          # Clean up any stale local manifests
+          docker manifest rm "${LATEST_TAG}" 2>/dev/null || true
+          docker manifest rm "${VERSION_TAGGED}" 2>/dev/null || true
+
+          # Verify per-arch images exist
+          echo "Checking per-arch images..."
+          docker manifest inspect "${IMAGE_BASE}:amd64-${VERSION_TAG}" || echo "amd64 image not found"
+          docker manifest inspect "${IMAGE_BASE}:arm64-${VERSION_TAG}" || echo "arm64 image not found"
+
+          if docker manifest inspect "${IMAGE_BASE}:amd64-${VERSION_TAG}" >/dev/null 2>&1 \
+            && docker manifest inspect "${IMAGE_BASE}:arm64-${VERSION_TAG}" >/dev/null 2>&1; then
+
+            echo "Both arch images exist. Creating manifest lists..."
+
+            docker manifest create "${LATEST_TAG}" \
+              --amend "${IMAGE_BASE}:amd64-${VERSION_TAG}" \
+              --amend "${IMAGE_BASE}:arm64-${VERSION_TAG}"
+            docker manifest push "${LATEST_TAG}"
+
+            docker manifest create "${VERSION_TAGGED}" \
+              --amend "${IMAGE_BASE}:amd64-${VERSION_TAG}" \
+              --amend "${IMAGE_BASE}:arm64-${VERSION_TAG}"
+            docker manifest push "${VERSION_TAGGED}"
+
+            echo "Manifest pushed for sc-${{ matrix.service }}"
+          else
+            echo "Architecture images not ready, skipping manifest for sc-${{ matrix.service }}"
+            exit 1
+          fi
+
+      - name: Inspect final manifest
+        run: |
+          docker manifest inspect "${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/sc-${{ matrix.service }}:latest"
