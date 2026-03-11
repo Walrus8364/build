@@ -56,7 +56,9 @@ jobs:
       - name: Detect affected services
         id: affected
         run: |
-          ALL_BACKEND_SERVICES='["api-gateway","auth-service","exa-service","order-service","payment-service","product-service","user-service"]'
+          # Dynamically discover all backend services from Nx (web is in .nxignore, excluded automatically)
+          ALL_BACKEND_SERVICES=$(pnpm nx show projects --type=app | grep -v '^web$' | jq -R . | jq -sc .)
+          echo "Discovered backend services: ${ALL_BACKEND_SERVICES}"
           PREV_TAG="${{ steps.tag.outputs.prev_tag }}"
 
           if [ -z "$PREV_TAG" ]; then
@@ -92,7 +94,7 @@ jobs:
 
           # Build the JSON array of affected backend services
           SERVICES=()
-          for svc in api-gateway auth-service exa-service order-service payment-service product-service user-service; do
+          for svc in $(echo "${ALL_BACKEND_SERVICES}" | jq -r '.[]'); do
             if echo "$NX_AFFECTED" | grep -q "^${svc}$"; then
               SERVICES+=("\"${svc}\"")
             fi
