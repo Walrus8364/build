@@ -57,6 +57,7 @@ jobs:
         id: buildx1
         continue-on-error: true
         uses: docker/build-push-action@v5
+        timeout-minutes: 15
         with:
           context: .
           file: ./Dockerfile
@@ -77,6 +78,7 @@ jobs:
       - name: Build and push Docker image to both registries
         if: steps.buildx1.outcome != 'success'
         uses: docker/build-push-action@v5
+        timeout-minutes: 15
         with:
           context: .
           file: ./Dockerfile
