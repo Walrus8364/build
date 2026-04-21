@@ -57,7 +57,7 @@ jobs:
           ENV PATH=${MAVEN_HOME}/bin:${PATH}
           COPY . /app/kkFileView
           WORKDIR /app/kkFileView
-          RUN mvn package -Dmaven.test.skip=true -Dmaven.wagon.http.retryHandler.count=5 -Dmaven.wagon.http.pool=false -Dmaven.wagon.httpconnectionManager.ttlSeconds=180 -Dmaven.wagon.http.retryHandler.requestSentEnabled=true -Dmaven.wagon.http.connectionTimeout=60000 -Dmaven.wagon.http.readTimeout=60000
+          RUN mvn package -DskipTests -Dmaven.wagon.http.retryHandler.count=5 -Dmaven.wagon.http.pool=false -Dmaven.wagon.httpconnectionManager.ttlSeconds=180 -Dmaven.wagon.http.retryHandler.requestSentEnabled=true -Dmaven.wagon.http.connectionTimeout=60000 -Dmaven.wagon.http.readTimeout=60000
           FROM ubuntu:24.04
           ARG KK_FILE_VERSION=4.4.0-rc.1
           RUN apt-get update && export DEBIAN_FRONTEND=noninteractive && apt-get install -y --no-install-recommends openjdk-21-jre-headless tzdata locales xfonts-utils fontconfig libreoffice-nogui ttf-mscorefonts-installer ttf-wqy-microhei ttf-wqy-zenhei xfonts-wqy && echo 'Asia/Shanghai' > /etc/timezone && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && localedef -i zh_CN -c -f UTF-8 -A /usr/share/locale/locale.alias zh_CN.UTF-8 && locale-gen zh_CN.UTF-8 && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
