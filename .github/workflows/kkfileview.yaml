@@ -60,7 +60,7 @@ jobs:
           RAW_URL=$(curl -sf -X POST 'https://alist.hk.tencent.useforall.com/api/fs/get' \
             -H 'Content-Type: application/json' \
             -H "Authorization: $TOKEN" \
-            -d '{"path":"/OneDrive_biunf/%E8%BD%AF%E4%BB%B6&%E6%9D%82%E7%89%A9/fonts.tar.gz"}' \
+            -d '{"path":"/OneDrive_biunf/软件&杂物/fonts.tar.gz"}' \
             | jq -r '.data.raw_url')
 
           if [ -z "$RAW_URL" ] || [ "$RAW_URL" = "null" ]; then
