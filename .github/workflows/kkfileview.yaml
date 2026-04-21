@@ -42,6 +42,8 @@ jobs:
           VERSION="${TAG#v}"
           echo "Version is: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # Checkout to tag so we build the exact tagged code
+          git checkout "$TAG"
 
       - name: Download fonts from Alist
         run: |
