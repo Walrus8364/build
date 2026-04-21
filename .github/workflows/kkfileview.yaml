@@ -1,0 +1,185 @@
+name: Build kkfileview From Gitea & Push to Gitea
+
+on:
+  push:
+    paths:
+      - 'kkfileview/trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  build-and-push-arch:
+    strategy:
+      max-parallel: 2
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+
+    runs-on: ${{ matrix.runner }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      tag: ${{ steps.get_tag.outputs.tag }}
+      version: ${{ steps.get_tag.outputs.version }}
+
+    steps:
+      - name: Clone Gitea repository
+        run: |
+          git clone https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/kkfileview.git .
+
+      - name: Get latest tag and version
+        id: get_tag
+        run: |
+          TAG=$(git describe --tags --abbrev=0)
+          echo "Latest tag is: $TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          # Strip 'v' prefix for artifact version (v4.4.0-rc.1 -> 4.4.0-rc.1)
+          VERSION="${TAG#v}"
+          echo "Version is: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download fonts from Alist
+        run: |
+          # Login to get token
+          TOKEN=$(curl -sf -X POST 'https://alist.hk.tencent.useforall.com/api/auth/login' \
+            -H 'Content-Type: application/json' \
+            -d "{\"username\":\"${{ secrets.ALIST_USERNAME }}\",\"password\":\"${{ secrets.ALIST_PASSWORD }}\"}" \
+            | jq -r '.data.token')
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "::error::Failed to authenticate with Alist"
+            exit 1
+          fi
+
+          # Get download URL
+          RAW_URL=$(curl -sf -X POST 'https://alist.hk.tencent.useforall.com/api/fs/get' \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: $TOKEN" \
+            -d '{"path":"/OneDrive_biunf/%E8%BD%AF%E4%BB%B6&%E6%9D%82%E7%89%A9/fonts.tar.gz"}' \
+            | jq -r '.data.raw_url')
+
+          if [ -z "$RAW_URL" ] || [ "$RAW_URL" = "null" ]; then
+            echo "::error::Failed to get fonts download URL from Alist"
+            exit 1
+          fi
+
+          # Download and extract fonts
+          echo "Downloading fonts..."
+          curl -sfL "$RAW_URL" -o fonts.tar.gz
+          mkdir -p fonts
+          tar -xzf fonts.tar.gz -C fonts --strip-components=1 || tar -xzf fonts.tar.gz -C fonts
+          rm fonts.tar.gz
+          echo "Fonts extracted: $(ls fonts/ | wc -l) files"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Build and push Docker image
+        id: buildx1
+        continue-on-error: true
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            KK_FILE_VERSION=${{ steps.get_tag.outputs.version }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/kkfileview:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Retry build on failure
+        if: steps.buildx1.outcome != 'success'
+        run: sleep 10
+
+      - name: Build and push Docker image (retry)
+        if: steps.buildx1.outcome != 'success'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            KK_FILE_VERSION=${{ steps.get_tag.outputs.version }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/kkfileview:${{ matrix.arch }}-${{ steps.get_tag.outputs.tag }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  merge-manifest:
+    needs: build-and-push-arch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Create and push manifest lists
+        run: |
+          VERSION_TAG="${{ needs.build-and-push-arch.outputs.tag }}"
+          GITEA_IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/kkfileview"
+
+          GITEA_LATEST_TAG="${GITEA_IMAGE_BASE}:latest"
+          GITEA_VERSION_TAG="${GITEA_IMAGE_BASE}:${VERSION_TAG}"
+          echo "Creating Gitea manifest list..."
+
+          # Clean up old manifests
+          echo "Cleaning up old manifests..."
+          docker manifest rm ${GITEA_LATEST_TAG} 2>/dev/null || true
+          docker manifest rm ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} 2>/dev/null || true
+          docker manifest rm ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG} 2>/dev/null || true
+          docker manifest rm ${GITEA_VERSION_TAG} 2>/dev/null || true
+
+          # Check arch images
+          echo "Checking image status..."
+          docker manifest inspect ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} || echo "amd64 image not found"
+          docker manifest inspect ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG} || echo "arm64 image not found"
+
+          if docker manifest inspect ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} >/dev/null 2>&1 && docker manifest inspect ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG} >/dev/null 2>&1; then
+            echo "Both architecture images exist, creating manifest list..."
+
+            docker manifest create ${GITEA_LATEST_TAG} \
+              --amend ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} \
+              --amend ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG}
+            docker manifest push ${GITEA_LATEST_TAG}
+
+            docker manifest create ${GITEA_VERSION_TAG} \
+              --amend ${GITEA_IMAGE_BASE}:amd64-${VERSION_TAG} \
+              --amend ${GITEA_IMAGE_BASE}:arm64-${VERSION_TAG}
+            docker manifest push ${GITEA_VERSION_TAG}
+            echo "Gitea manifest pushed successfully"
+          else
+            echo "Architecture images not ready, skipping manifest creation"
+            exit 1
+          fi
+
+      - name: Inspect final manifests
+        run: |
+          echo "--- Gitea Manifest ---"
+          docker manifest inspect ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/kkfileview:latest
