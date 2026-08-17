@@ -1,0 +1,180 @@
+# Build the self-maintained OpenList fork (aio variant only) and push to Gitea.
+# Triggered by the fork's Gitea workflow writing the tagged commit SHA to OpenList/trigger.txt.
+name: Build OpenList From Gitea & Push to Gitea
+
+on:
+  push:
+    paths:
+      - 'OpenList/trigger.txt'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (like v4.2.5-fork1). Defaults to the tag at the triggered commit.'
+        required: false
+        type: string
+
+jobs:
+  # ── Job 1: Resolve which commit and tag to build ───────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Checkout build repo (for the trigger file)
+        uses: actions/checkout@v4
+        with:
+          path: trigger
+
+      - name: Clone Gitea repository (full history for tag lookup)
+        run: |
+          git clone --no-single-branch \
+            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/OpenList.git" src
+          cd src && git fetch --tags --force
+
+      - name: Resolve commit and tag
+        id: resolve
+        working-directory: src
+        run: |
+          set -e
+          MANUAL="${{ github.event.inputs.tag }}"
+          if [ -n "$MANUAL" ]; then
+            TAG="$MANUAL"
+            SHA=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          else
+            SHA=$(tr -d '[:space:]' < ../trigger/OpenList/trigger.txt)
+            [ -n "$SHA" ] || { echo "OpenList/trigger.txt is empty"; exit 1; }
+            # Prefer a tag pointing exactly at the triggered commit; fall back to
+            # the nearest ancestor tag. 'beta' is excluded because build.sh
+            # deletes it before deriving the version, so it would never match
+            # what ends up baked into the binary.
+            TAG=$(git tag --points-at "$SHA" --sort=-v:refname | grep '^v' | head -1 || true)
+            [ -n "$TAG" ] || TAG=$(git describe --tags --abbrev=0 --match 'v*' "$SHA")
+          fi
+          echo "Building ${SHA} as ${TAG}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+  # ── Job 2: Build & push per-architecture images ────────────────────
+  build-and-push:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+
+    steps:
+      # build.sh derives the version from `git describe` and the commit from
+      # `git log`, and it runs inside the image build — so the .git directory
+      # has to be part of the build context. OpenList has no .dockerignore, so
+      # a plain clone is enough.
+      - name: Clone Gitea repository and check out the triggered commit
+        run: |
+          git clone \
+            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/OpenList.git" .
+          git fetch --tags --force
+          git checkout --detach "${{ needs.prepare.outputs.sha }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      # No QEMU: each architecture builds on its own native runner, and the
+      # Dockerfile compiles Go inside Alpine so the binary matches the musl
+      # runtime base image.
+      - name: Build and push (attempt 1)
+        id: buildx1
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            BASE_IMAGE_TAG=aio
+            INSTALL_FFMPEG=true
+            INSTALL_ARIA2=true
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/openlist:${{ matrix.arch }}-${{ needs.prepare.outputs.tag }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=openlist-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=openlist-${{ matrix.arch }}
+
+      - name: Wait before retry
+        if: steps.buildx1.outcome != 'success'
+        run: sleep 30
+
+      - name: Build and push (retry)
+        if: steps.buildx1.outcome != 'success'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            BASE_IMAGE_TAG=aio
+            INSTALL_FFMPEG=true
+            INSTALL_ARIA2=true
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/openlist:${{ matrix.arch }}-${{ needs.prepare.outputs.tag }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=openlist-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=openlist-${{ matrix.arch }}
+
+  # ── Job 3: Merge multi-arch manifests ──────────────────────────────
+  merge-manifest:
+    needs: [prepare, build-and-push]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Create and push manifest list
+        run: |
+          set -e
+          VERSION_TAG="${{ needs.prepare.outputs.tag }}"
+          IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/openlist"
+
+          AMD64="${IMAGE_BASE}:amd64-${VERSION_TAG}"
+          ARM64="${IMAGE_BASE}:arm64-${VERSION_TAG}"
+
+          # Both must exist: publishing a half manifest would silently give
+          # one architecture a working image and the other a missing one.
+          docker manifest inspect "${AMD64}" >/dev/null
+          docker manifest inspect "${ARM64}" >/dev/null
+
+          for TAG in "${VERSION_TAG}" latest; do
+            TARGET="${IMAGE_BASE}:${TAG}"
+            docker manifest rm "${TARGET}" 2>/dev/null || true
+            docker manifest create "${TARGET}" --amend "${AMD64}" --amend "${ARM64}"
+            docker manifest push "${TARGET}"
+            echo "Pushed ${TARGET}"
+          done
+
+      - name: Inspect final manifest
+        run: |
+          docker manifest inspect "${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/openlist:latest"
