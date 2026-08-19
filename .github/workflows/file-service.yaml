@@ -1,0 +1,178 @@
+# Build the internal File Service (NestJS + pnpm workspace) and push to Gitea.
+# Triggered by the Gitea repo's workflow writing the tagged commit SHA to
+# File-Service/trigger.txt.
+name: Build File-Service From Gitea & Push to Gitea
+
+on:
+  push:
+    paths:
+      - 'File-Service/trigger.txt'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (like v0.2.0). Defaults to the tag at the triggered commit.'
+        required: false
+        type: string
+
+jobs:
+  # ── Job 1: Resolve which commit and tag to build ───────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Checkout build repo (for the trigger file)
+        uses: actions/checkout@v4
+        with:
+          path: trigger
+
+      - name: Clone Gitea repository (full history for tag lookup)
+        run: |
+          git clone --no-single-branch \
+            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/File-Service.git" src
+          cd src && git fetch --tags --force
+
+      - name: Resolve commit and tag
+        id: resolve
+        working-directory: src
+        run: |
+          set -e
+          MANUAL="${{ github.event.inputs.tag }}"
+          if [ -n "$MANUAL" ]; then
+            TAG="$MANUAL"
+            # sdk-v* tags publish the npm packages; they must never name an image
+            case "$TAG" in
+              v*) ;;
+              *) echo "::error::image builds only accept v* tags, got ${TAG}"; exit 1 ;;
+            esac
+            SHA=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          else
+            SHA=$(tr -d '[:space:]' < ../trigger/File-Service/trigger.txt)
+            [ -n "$SHA" ] || { echo "File-Service/trigger.txt is empty"; exit 1; }
+            # The tag must point *exactly* at the triggered commit. No
+            # git-describe fallback to the nearest ancestor tag: that would let
+            # an untagged commit be published under an existing version tag and
+            # silently overwrite it. Unlike OpenList, nothing here derives a
+            # version from git metadata, so there is no reason to accept one.
+            TAG=$(git tag --points-at "$SHA" --sort=-v:refname | grep '^v' | head -1 || true)
+            [ -n "$TAG" ] || { echo "::error::commit ${SHA} carries no v* tag"; exit 1; }
+          fi
+          echo "Building ${SHA} as ${TAG}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+  # ── Job 2: Build & push per-architecture images ────────────────────
+  build-and-push:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+
+    steps:
+      # The Dockerfile does not read git metadata, but the build context is the
+      # repo root (pnpm workspace: the service depends on packages/contracts
+      # through the workspace protocol), so the whole tree has to be here.
+      - name: Clone Gitea repository and check out the triggered commit
+        run: |
+          git clone \
+            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/File-Service.git" .
+          git fetch --tags --force
+          git checkout --detach "${{ needs.prepare.outputs.sha }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      # No QEMU: each architecture builds on its own native runner. That matters
+      # here — 7zip-bin-full ships prebuilt per-arch binaries, and node modules
+      # are installed inside the image.
+      - name: Build and push (attempt 1)
+        id: buildx1
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/file-service:${{ matrix.arch }}-${{ needs.prepare.outputs.tag }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=file-service-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=file-service-${{ matrix.arch }}
+
+      - name: Wait before retry
+        if: steps.buildx1.outcome != 'success'
+        run: sleep 30
+
+      - name: Build and push (retry)
+        if: steps.buildx1.outcome != 'success'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/file-service:${{ matrix.arch }}-${{ needs.prepare.outputs.tag }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=file-service-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=file-service-${{ matrix.arch }}
+
+  # ── Job 3: Merge multi-arch manifests ──────────────────────────────
+  merge-manifest:
+    needs: [prepare, build-and-push]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Create and push manifest list
+        run: |
+          set -e
+          VERSION_TAG="${{ needs.prepare.outputs.tag }}"
+          IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/file-service"
+
+          AMD64="${IMAGE_BASE}:amd64-${VERSION_TAG}"
+          ARM64="${IMAGE_BASE}:arm64-${VERSION_TAG}"
+
+          # Both must exist: publishing a half manifest would silently give
+          # one architecture a working image and the other a missing one.
+          docker manifest inspect "${AMD64}" >/dev/null
+          docker manifest inspect "${ARM64}" >/dev/null
+
+          for TAG in "${VERSION_TAG}" latest; do
+            TARGET="${IMAGE_BASE}:${TAG}"
+            docker manifest rm "${TARGET}" 2>/dev/null || true
+            docker manifest create "${TARGET}" --amend "${AMD64}" --amend "${ARM64}"
+            docker manifest push "${TARGET}"
+            echo "Pushed ${TARGET}"
+          done
+
+      - name: Inspect final manifest
+        run: |
+          docker manifest inspect "${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/file-service:latest"
