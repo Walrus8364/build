@@ -1,0 +1,200 @@
+# Build the WeChat Observatory LSPosed module from Gitea and publish the signed
+# APK to a Gitea release.
+# Triggered by the Gitea repo writing the tagged commit SHA to
+# wechat-observatory/trigger.txt.
+name: Build WeChat Observatory LSPosed Module & Publish to Gitea
+
+on:
+  push:
+    paths:
+      - 'wechat-observatory/trigger.txt'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (like lsposed-v0.0.1). Defaults to the tag at the triggered commit.'
+        required: false
+        type: string
+
+env:
+  # AGP 8.7.3 requires Gradle 8.9+ and JDK 17; compileSdk 35 needs build-tools 35.0.0.
+  GRADLE_VERSION: "8.11.1"
+  ANDROID_COMPILE_SDK: "35"
+  ANDROID_BUILD_TOOLS: "35.0.0"
+  GITEA_REPO: wechat-observatory
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout build repo (for the trigger file)
+        uses: actions/checkout@v4
+        with:
+          path: trigger
+
+      - name: Clone Gitea repository (full history for tag lookup)
+        run: |
+          git clone --no-single-branch \
+            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/${GITEA_REPO}.git" src
+          cd src && git fetch --tags --force
+
+      - name: Resolve commit and tag
+        id: resolve
+        working-directory: src
+        run: |
+          set -euo pipefail
+          MANUAL="${{ github.event.inputs.tag }}"
+          if [ -n "$MANUAL" ]; then
+            TAG="$MANUAL"
+            SHA=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          else
+            SHA=$(tr -d '[:space:]' < ../trigger/wechat-observatory/trigger.txt)
+            [ -n "$SHA" ] || { echo "wechat-observatory/trigger.txt is empty"; exit 1; }
+            # Prefer a tag pointing exactly at the triggered commit; fall back to
+            # the nearest ancestor tag so a manual re-run still resolves a version.
+            TAG=$(git tag --points-at "$SHA" --sort=-v:refname | grep '^lsposed-v' | head -1 || true)
+            [ -n "$TAG" ] || TAG=$(git describe --tags --abbrev=0 --match 'lsposed-v*' "$SHA")
+          fi
+
+          VERSION="${TAG#lsposed-v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$TAG" ]; then
+            echo "tag ${TAG} does not match lsposed-v*" >&2
+            exit 1
+          fi
+
+          git checkout --detach "$SHA"
+          echo "Building ${SHA} as ${TAG}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=wechat-observatory-lsposed-${VERSION}.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ubuntu-latest ships an Android SDK, but not necessarily this exact
+      # build-tools revision; this makes the requirement explicit.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-${{ env.ANDROID_COMPILE_SDK }}
+            build-tools;${{ env.ANDROID_BUILD_TOOLS }}
+
+      # The project has no Gradle Wrapper, so the action provisions Gradle and
+      # caches the whole Gradle User Home between runs.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Run unit tests
+        working-directory: src/android-module
+        run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Build release APK
+        working-directory: src/android-module
+        run: gradle :app:assembleRelease --stacktrace
+
+      # app/build.gradle declares no signingConfigs, so assembleRelease produces
+      # an unsigned APK. Sign it with build-tools rather than patching the
+      # project's build script.
+      - name: Sign APK
+        id: sign
+        env:
+          KEYSTORE_B64: ${{ secrets.WECHAT_OBSERVATORY_SIGNING_KEYSTORE_B64 }}
+          STORE_PASSWORD: ${{ secrets.WECHAT_OBSERVATORY_SIGNING_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.WECHAT_OBSERVATORY_SIGNING_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.WECHAT_OBSERVATORY_SIGNING_KEY_PASSWORD }}
+          APK_NAME: ${{ steps.resolve.outputs.apk_name }}
+        run: |
+          set -euo pipefail
+          for var in KEYSTORE_B64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!var:-}" ]; then
+              echo "missing required repository secret: WECHAT_OBSERVATORY_SIGNING_${var}" >&2
+              exit 1
+            fi
+          done
+
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          [ -n "${sdk_root}" ] || { echo "ANDROID_HOME is not set" >&2; exit 1; }
+          tools="${sdk_root}/build-tools/${ANDROID_BUILD_TOOLS}"
+
+          unsigned="src/android-module/app/build/outputs/apk/release/app-release-unsigned.apk"
+          if [ ! -f "${unsigned}" ]; then
+            echo "unsigned apk not found at ${unsigned}" >&2
+            find src/android-module/app/build/outputs -name "*.apk" >&2 || true
+            exit 1
+          fi
+
+          workdir="$(mktemp -d)"
+          # The keystore and plaintext passwords only ever live in the runner's
+          # temp dir, which is destroyed with the job.
+          printf '%s' "${KEYSTORE_B64}" | base64 -d > "${workdir}/keystore.jks"
+
+          "${tools}/zipalign" -p -f 4 "${unsigned}" "${workdir}/aligned.apk"
+          "${tools}/apksigner" sign \
+            --ks "${workdir}/keystore.jks" \
+            --ks-pass "env:STORE_PASSWORD" \
+            --ks-key-alias "${KEY_ALIAS}" \
+            --key-pass "env:KEY_PASSWORD" \
+            --out "${workdir}/${APK_NAME}" \
+            "${workdir}/aligned.apk"
+          "${tools}/apksigner" verify --verbose "${workdir}/${APK_NAME}"
+
+          mkdir -p dist
+          mv "${workdir}/${APK_NAME}" "dist/${APK_NAME}"
+          rm -rf "${workdir}"
+
+          echo "apk_path=dist/${APK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "dist/${APK_NAME}" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish Gitea release
+        env:
+          GITEA_HOST: ${{ secrets.GITEA_HOST }}
+          GITEA_USERNAME: ${{ secrets.GITEA_USERNAME }}
+          TOKEN: ${{ secrets.GITEA_CODE_PAT }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          APK_NAME: ${{ steps.resolve.outputs.apk_name }}
+          APK_PATH: ${{ steps.sign.outputs.apk_path }}
+          APK_SHA256: ${{ steps.sign.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          api="https://${GITEA_HOST}/api/v1/repos/${GITEA_USERNAME}/${GITEA_REPO}"
+          auth="Authorization: token ${TOKEN}"
+
+          body=$(printf 'WeChat Observatory LSPosed module %s\n\n- Target: WeChat for Android 8.0.74\n- SHA256: `%s`\n' \
+            "${VERSION}" "${APK_SHA256}")
+          payload=$(jq -n --arg tag "${TAG}" --arg name "LSPosed ${VERSION}" --arg body "${body}" \
+            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}')
+
+          # Reuse the release when the tag already has one (e.g. a re-run).
+          release_id=$(curl -sS -X POST "${api}/releases" \
+            -H "${auth}" -H "Content-Type: application/json" \
+            -d "${payload}" | jq -r '.id // empty')
+          if [ -z "${release_id}" ]; then
+            echo "create release failed or already exists, looking up by tag"
+            release_id=$(curl -sS -H "${auth}" "${api}/releases/tags/${TAG}" | jq -r '.id // empty')
+          fi
+          [ -n "${release_id}" ] || { echo "unable to resolve release id for ${TAG}" >&2; exit 1; }
+
+          # Drop a same-named asset first so re-runs publish the fresh build.
+          old_asset=$(curl -sS -H "${auth}" "${api}/releases/${release_id}/assets" \
+            | jq -r --arg n "${APK_NAME}" '.[] | select(.name == $n) | .id' | head -n1)
+          if [ -n "${old_asset}" ]; then
+            curl -sS -X DELETE -H "${auth}" "${api}/releases/${release_id}/assets/${old_asset}"
+          fi
+
+          curl -sS -X POST "${api}/releases/${release_id}/assets?name=${APK_NAME}" \
+            -H "${auth}" \
+            -F "attachment=@${APK_PATH}" \
+            -o /dev/null -w 'uploaded %{http_code}\n'
+
+          echo "released ${TAG} -> ${APK_NAME}"
