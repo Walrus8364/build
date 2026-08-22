@@ -64,11 +64,19 @@ jobs:
             exit 1
           fi
 
+          # Android versionCode must be a strictly increasing integer, so derive
+          # one from the semver parts. Any pre-release suffix is dropped first.
+          IFS='.' read -r VMAJ VMIN VPAT <<< "${VERSION%%-*}"
+          VERSION_CODE=$(( ${VMAJ:-0} * 10000 + ${VMIN:-0} * 100 + ${VPAT:-0} ))
+          # 0.0.0 would yield 0, which Android rejects.
+          [ "$VERSION_CODE" -gt 0 ] || VERSION_CODE=1
+
           git checkout --detach "$SHA"
-          echo "Building ${SHA} as ${TAG}"
+          echo "Building ${SHA} as ${TAG} (versionCode ${VERSION_CODE})"
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
           echo "apk_name=wechat-observatory-lsposed-${VERSION}.apk" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
@@ -98,9 +106,13 @@ jobs:
         working-directory: src/android-module
         run: gradle :app:testDebugUnitTest --stacktrace
 
+      # The tag drives the version baked into the APK, not just its file name.
       - name: Build release APK
         working-directory: src/android-module
-        run: gradle :app:assembleRelease --stacktrace
+        run: |
+          gradle :app:assembleRelease --stacktrace \
+            -PmoduleVersionName="${{ steps.resolve.outputs.version }}" \
+            -PmoduleVersionCode="${{ steps.resolve.outputs.version_code }}"
 
       # app/build.gradle declares no signingConfigs, so assembleRelease produces
       # an unsigned APK. Sign it with build-tools rather than patching the
