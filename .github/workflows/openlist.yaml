@@ -98,7 +98,7 @@ jobs:
       - name: Build and push (attempt 1)
         id: buildx1
         continue-on-error: true
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
@@ -121,7 +121,7 @@ jobs:
 
       - name: Build and push (retry)
         if: steps.buildx1.outcome != 'success'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
