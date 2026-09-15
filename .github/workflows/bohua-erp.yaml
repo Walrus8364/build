@@ -1,0 +1,203 @@
+# Build the Bohua ERP backend (NestJS + Fastify, with the standalone check-in page
+# bundled in) and push to the Gitea container registry.
+# Triggered by the Gitea repo's workflow writing the tagged commit SHA to
+# Bohua_ERP/trigger.txt.
+name: Build Bohua_ERP From Gitea & Push to Gitea
+
+on:
+  push:
+    paths:
+      - 'Bohua_ERP/trigger.txt'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (like v0.2.0). Defaults to the tag at the triggered commit.'
+        required: false
+        type: string
+
+jobs:
+  # ── Job 1: Resolve which commit and tag to build ───────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      # Pinned to the event commit, not current main: the build repo is shared with
+      # sibling projects, so main can already carry someone else's trigger by now.
+      - name: Checkout build repo (for the trigger file)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: trigger
+
+      - name: Clone Gitea repository (full history for tag lookup)
+        run: |
+          git clone --no-single-branch \
+            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/Bohua_ERP.git" src
+          cd src && git fetch --tags --force
+
+      - name: Resolve commit and tag
+        id: resolve
+        working-directory: src
+        env:
+          MANUAL_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -e
+          if [ -n "$MANUAL_TAG" ]; then
+            TAG="$MANUAL_TAG"
+            case "$TAG" in
+              v*) ;;
+              *) echo "::error::image builds only accept v* tags, got ${TAG}"; exit 1 ;;
+            esac
+            # Peel annotated tags: a tag object's own SHA is not the commit SHA
+            SHA=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          else
+            SHA=$(tr -d '[:space:]' < ../trigger/Bohua_ERP/trigger.txt)
+            [ -n "$SHA" ] || { echo "::error::Bohua_ERP/trigger.txt is empty"; exit 1; }
+            # The tag must point *exactly* at the triggered commit. No git-describe
+            # fallback to the nearest ancestor tag: that would let an untagged commit
+            # be published under an existing version tag and silently overwrite it.
+            TAG=$(git tag --points-at "$SHA" --sort=-v:refname | grep '^v' | head -1 || true)
+            [ -n "$TAG" ] || { echo "::error::commit ${SHA} carries no v* tag"; exit 1; }
+          fi
+          echo "Building ${SHA} as ${TAG}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+  # ── Job 2: Build & push per-architecture images ────────────────────
+  build-and-push:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+
+    steps:
+      # The build context is the repo root: the Dockerfile also builds check-in-web/,
+      # which is a deliberately separate sub-package (its own lockfile, no workspace).
+      - name: Clone Gitea repository and check out the triggered commit
+        run: |
+          git clone \
+            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/Bohua_ERP.git" .
+          git fetch --tags --force
+          git checkout --detach "${{ needs.prepare.outputs.sha }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      # No QEMU: each architecture builds on its own native runner. Dependencies are
+      # installed inside the image, so emulation would only make that slower.
+      #
+      # `context: .` is explicit on purpose — build-push-action defaults to the *Git*
+      # context of this (build) repo, which does not contain the ERP source at all.
+      #
+      # secrets/gitea_npm_token feeds the private npm registry in .npmrc
+      # (@file-service/sdk). It is mounted into the install steps only, never a layer.
+      #
+      # The three VITE_* build args are baked into the check-in page bundle, so this
+      # image is bound to one Keycloak deployment. GitHub secret names are prefixed
+      # BOHUA_ERP_* and renamed here; application source knows only the VITE_* names.
+      - name: Build and push (attempt 1)
+        id: buildx1
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/bohua-erp:${{ matrix.arch }}-${{ needs.prepare.outputs.tag }}
+          build-args: |
+            VITE_KEYCLOAK_URL=${{ secrets.BOHUA_ERP_KEYCLOAK_URL }}
+            VITE_KEYCLOAK_REALM=${{ secrets.BOHUA_ERP_KEYCLOAK_REALM }}
+            VITE_KEYCLOAK_CLIENT_ID=${{ secrets.BOHUA_ERP_KEYCLOAK_CLIENT_ID }}
+          secrets: |
+            gitea_npm_token=${{ secrets.GITEA_PACKAGE_REGISTRY_TOKEN }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=bohua-erp-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=bohua-erp-${{ matrix.arch }}
+
+      - name: Wait before retry
+        if: steps.buildx1.outcome != 'success'
+        run: sleep 30
+
+      # No continue-on-error here: if the retry fails too, this architecture's job must
+      # go red, otherwise the manifest job would merge a stale per-arch tag.
+      - name: Build and push (retry)
+        if: steps.buildx1.outcome != 'success'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/bohua-erp:${{ matrix.arch }}-${{ needs.prepare.outputs.tag }}
+          build-args: |
+            VITE_KEYCLOAK_URL=${{ secrets.BOHUA_ERP_KEYCLOAK_URL }}
+            VITE_KEYCLOAK_REALM=${{ secrets.BOHUA_ERP_KEYCLOAK_REALM }}
+            VITE_KEYCLOAK_CLIENT_ID=${{ secrets.BOHUA_ERP_KEYCLOAK_CLIENT_ID }}
+          secrets: |
+            gitea_npm_token=${{ secrets.GITEA_PACKAGE_REGISTRY_TOKEN }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=bohua-erp-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=bohua-erp-${{ matrix.arch }}
+
+  # ── Job 3: Merge multi-arch manifests ──────────────────────────────
+  merge-manifest:
+    needs: [prepare, build-and-push]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Create and push manifest list
+        run: |
+          set -e
+          VERSION_TAG="${{ needs.prepare.outputs.tag }}"
+          IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/bohua-erp"
+
+          AMD64="${IMAGE_BASE}:amd64-${VERSION_TAG}"
+          ARM64="${IMAGE_BASE}:arm64-${VERSION_TAG}"
+
+          # Both must exist before anything is published: a half manifest would silently
+          # give one architecture a working image and the other a missing one.
+          docker manifest inspect "${AMD64}" >/dev/null
+          docker manifest inspect "${ARM64}" >/dev/null
+
+          for TAG in "${VERSION_TAG}" latest; do
+            TARGET="${IMAGE_BASE}:${TAG}"
+            docker manifest rm "${TARGET}" 2>/dev/null || true
+            docker manifest create "${TARGET}" --amend "${AMD64}" --amend "${ARM64}"
+            docker manifest push "${TARGET}"
+            echo "Pushed ${TARGET}"
+          done
+
+      - name: Inspect final manifest
+        run: |
+          docker manifest inspect "${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/bohua-erp:latest"
