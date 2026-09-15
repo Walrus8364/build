@@ -127,7 +127,7 @@ jobs:
             VITE_KEYCLOAK_REALM=${{ secrets.BOHUA_ERP_KEYCLOAK_REALM }}
             VITE_KEYCLOAK_CLIENT_ID=${{ secrets.BOHUA_ERP_KEYCLOAK_CLIENT_ID }}
           secrets: |
-            gitea_npm_token=${{ secrets.GITEA_PACKAGE_REGISTRY_TOKEN }}
+            gitea_npm_token=${{ secrets.GITEA_CODE_PAT }}
           push: true
           provenance: false
           sbom: false
@@ -154,7 +154,7 @@ jobs:
             VITE_KEYCLOAK_REALM=${{ secrets.BOHUA_ERP_KEYCLOAK_REALM }}
             VITE_KEYCLOAK_CLIENT_ID=${{ secrets.BOHUA_ERP_KEYCLOAK_CLIENT_ID }}
           secrets: |
-            gitea_npm_token=${{ secrets.GITEA_PACKAGE_REGISTRY_TOKEN }}
+            gitea_npm_token=${{ secrets.GITEA_CODE_PAT }}
           push: true
           provenance: false
           sbom: false
