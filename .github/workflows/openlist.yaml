@@ -29,7 +29,7 @@ jobs:
       - name: Clone Gitea repository (full history for tag lookup)
         run: |
           git clone --no-single-branch \
-            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/OpenList.git" src
+            "http://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/OpenList.git" src
           cd src && git fetch --tags --force
 
       - name: Resolve commit and tag
@@ -78,7 +78,7 @@ jobs:
       - name: Clone Gitea repository and check out the triggered commit
         run: |
           git clone \
-            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/OpenList.git" .
+            "http://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/OpenList.git" .
           git fetch --tags --force
           git checkout --detach "${{ needs.prepare.outputs.sha }}"
 
