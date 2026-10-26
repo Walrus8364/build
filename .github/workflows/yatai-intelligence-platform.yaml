@@ -1,0 +1,324 @@
+# Build the YaTai Intelligence Platform backend (Nx monorepo: api-gateway + five gRPC
+# services) and push one image per service to the Gitea container registry.
+# Triggered by the Gitea repo's workflow writing the tagged commit SHA to
+# YaTai_Intelligence_Platform/trigger.txt.
+#
+# Only services whose image content changed are rebuilt, so a release restarts only those
+# containers on `docker compose pull && docker compose up -d` (a rebuilt image gets a new
+# digest even from identical code, and compose recreates any container whose digest moved).
+#
+# "Changed" is measured against the commit each service's current :latest was built from
+# (its org.opencontainers.image.revision label), NOT against the previous tag. A release
+# whose build failed never moved :latest, so its changes are still pending and the next
+# release picks them up; diffing against the previous tag would skip them silently.
+name: Build YaTai_Intelligence_Platform From Gitea & Push to Gitea
+
+on:
+  push:
+    paths:
+      - 'YaTai_Intelligence_Platform/trigger.txt'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (like v0.3.0). Defaults to the tag at the triggered commit.'
+        required: false
+        type: string
+      force_all:
+        description: 'Rebuild every service even if unchanged (e.g. to pick up a patched base image).'
+        required: false
+        type: boolean
+        default: false
+
+# Every run moves the same :latest tags; two runs must never interleave.
+concurrency:
+  group: yatai-intelligence-platform
+  cancel-in-progress: false
+
+env:
+  # Private npm registry for @file-service/sdk. Same registry and token as Bohua_ERP.
+  NPM_REGISTRY_AUTH_KEY: //gitea.hk.tencent.useforall.com/api/packages/lim/npm/:_authToken
+  NX_DAEMON: 'false'
+  NX_NO_CLOUD: 'true'
+
+jobs:
+  # ── Job 1: Resolve commit/tag and decide which services to build ────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      services: ${{ steps.detect.outputs.services }}
+      has_services: ${{ steps.detect.outputs.has_services }}
+    steps:
+      # Pinned to the event commit, not current main: the build repo is shared with
+      # sibling projects, so main can already carry someone else's trigger by now.
+      - name: Checkout build repo (for the trigger file)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: trigger
+
+      - name: Clone Gitea repository (full history for tag lookup and change detection)
+        run: |
+          git clone --no-single-branch \
+            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/YaTai_Intelligence_Platform.git" src
+          cd src && git fetch --tags --force
+
+      - name: Resolve commit and tag
+        id: resolve
+        working-directory: src
+        env:
+          MANUAL_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -e
+          if [ -n "$MANUAL_TAG" ]; then
+            TAG="$MANUAL_TAG"
+            case "$TAG" in
+              v*) ;;
+              *) echo "::error::image builds only accept v* tags, got ${TAG}"; exit 1 ;;
+            esac
+            # Peel annotated tags: a tag object's own SHA is not the commit SHA
+            SHA=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          else
+            SHA=$(tr -d '[:space:]' < ../trigger/YaTai_Intelligence_Platform/trigger.txt)
+            [ -n "$SHA" ] || { echo "::error::YaTai_Intelligence_Platform/trigger.txt is empty"; exit 1; }
+            # The tag must point *exactly* at the triggered commit. No git-describe
+            # fallback to the nearest ancestor tag: that would let an untagged commit
+            # be published under an existing version tag and silently overwrite it.
+            TAG=$(git tag --points-at "$SHA" --sort=-v:refname | grep '^v' | head -1 || true)
+            [ -n "$TAG" ] || { echo "::error::commit ${SHA} carries no v* tag"; exit 1; }
+          fi
+          # Change detection runs Nx against this exact commit's project graph.
+          git checkout --detach "$SHA"
+          echo "Building ${SHA} as ${TAG}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: src/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: src/pnpm-lock.yaml
+
+      # pnpm 10 refuses to expand credentials from a project-level .npmrc, so the token
+      # goes into the user-level config; the repo's .npmrc only maps the scope.
+      - name: Authenticate private npm registry
+        env:
+          NPM_TOKEN: ${{ secrets.GITEA_CODE_PAT }}
+        run: pnpm config set --global "$NPM_REGISTRY_AUTH_KEY" "$NPM_TOKEN"
+
+      # Nx needs the workspace installed to build the project graph.
+      - name: Install dependencies
+        working-directory: src
+        run: pnpm install --frozen-lockfile
+
+      - name: Log in to Gitea Container Registry (reads the current :latest provenance)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Detect services to build
+        id: detect
+        working-directory: src
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          FORCE_ALL: ${{ github.event.inputs.force_all }}
+          IMAGE_PREFIX: ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/yatai-
+        run: |
+          set -euo pipefail
+          # Deployable services are every Nx app except the one-shot cutover CLI, which
+          # runs from a host checkout. Same rule as scripts/docker-build-affected.sh.
+          ALL=$(pnpm --silent nx show projects --type=app --exclude=fs-cutover --json | jq -r '.[]' | sort)
+          # Files outside every Nx project that still change what an image contains
+          # (the Dockerfile copies them). Nx project files are covered by `--affected`.
+          GLOBAL_INPUTS=(Dockerfile .dockerignore .npmrc package.json pnpm-lock.yaml pnpm-workspace.yaml nx.json tsconfig.base.json tsconfig.json)
+          BUILD=()
+          for svc in $ALL; do
+            if [ "$FORCE_ALL" = "true" ]; then
+              echo "${svc}: forced"; BUILD+=("$svc"); continue
+            fi
+            # Any inspect failure (missing image, no label, registry error) means no
+            # trustworthy baseline, and the safe answer to that is to build.
+            REV=$(docker buildx imagetools inspect "${IMAGE_PREFIX}${svc}:latest" --format '{{json .Image}}' 2>/dev/null \
+              | jq -r '[.. | objects | .Labels? | objects | .["org.opencontainers.image.revision"] | strings] | first // empty' \
+              || true)
+            if [ -z "$REV" ]; then
+              echo "${svc}: no :latest with a revision label, building"; BUILD+=("$svc")
+            elif [ "$REV" = "$SHA" ]; then
+              echo "${svc}: :latest already built from ${SHA}, skipping"
+            elif ! git cat-file -e "${REV}^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$REV" "$SHA"; then
+              # Rewritten history, or an older/side-branch tag: not comparable, so build.
+              echo "${svc}: :latest revision ${REV} is not an ancestor of ${SHA}, building"; BUILD+=("$svc")
+            elif ! git diff --quiet "$REV" "$SHA" -- "${GLOBAL_INPUTS[@]}"; then
+              echo "${svc}: root build inputs changed since ${REV}, building"; BUILD+=("$svc")
+            else
+              # Assigned on its own line so an Nx failure aborts the run (set -e) instead
+              # of reading as "not affected" and skipping a changed service.
+              AFFECTED=$(pnpm --silent nx show projects --affected --base="$REV" --head="$SHA" --type=app --json)
+              if jq -e --arg s "$svc" 'any(.[]; . == $s)' <<<"$AFFECTED" >/dev/null; then
+                echo "${svc}: affected since ${REV}, building"; BUILD+=("$svc")
+              else
+                echo "${svc}: unchanged since ${REV}, skipping"
+              fi
+            fi
+          done
+          if [ ${#BUILD[@]} -eq 0 ]; then
+            echo "services=[]" >> "$GITHUB_OUTPUT"
+            echo "has_services=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No service changed since its :latest image; nothing to build."
+          else
+            JSON=$(printf '%s\n' "${BUILD[@]}" | jq -R . | jq -sc .)
+            echo "services=${JSON}" >> "$GITHUB_OUTPUT"
+            echo "has_services=true" >> "$GITHUB_OUTPUT"
+            echo "Services to build: ${JSON}"
+          fi
+
+  # ── Job 2: Build & push per-service, per-architecture images ────────
+  build-and-push:
+    needs: prepare
+    if: needs.prepare.outputs.has_services == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(needs.prepare.outputs.services) }}
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Clone Gitea repository and check out the triggered commit
+        run: |
+          git clone \
+            "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/YaTai_Intelligence_Platform.git" .
+          git fetch --tags --force
+          git checkout --detach "${{ needs.prepare.outputs.sha }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      # No QEMU: each architecture builds on its own native runner.
+      #
+      # `context: .` is explicit on purpose — build-push-action defaults to the *Git*
+      # context of this (build) repo, which does not contain the source at all.
+      #
+      # npm_registry_config is mounted as the user-level npmrc for the install steps
+      # only (NPM_CONFIG_USERCONFIG in the Dockerfile), never into a layer.
+      #
+      # The revision label is what the next run's change detection reads back.
+      - name: Build and push (attempt 1)
+        id: buildx1
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: service
+          build-args: APP_NAME=${{ matrix.service }}
+          platforms: linux/${{ matrix.arch }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/yatai-${{ matrix.service }}:${{ matrix.arch }}-${{ needs.prepare.outputs.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.tag }}
+          secrets: |
+            npm_registry_config=${{ env.NPM_REGISTRY_AUTH_KEY }}=${{ secrets.GITEA_CODE_PAT }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=yatai-${{ matrix.service }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=yatai-${{ matrix.service }}-${{ matrix.arch }}
+
+      - name: Wait before retry
+        if: steps.buildx1.outcome != 'success'
+        run: sleep 30
+
+      # No continue-on-error here: if the retry fails too, this job must go red. The
+      # manifest job then never runs, so no service's :latest moves for this release.
+      - name: Build and push (retry)
+        if: steps.buildx1.outcome != 'success'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: service
+          build-args: APP_NAME=${{ matrix.service }}
+          platforms: linux/${{ matrix.arch }}
+          tags: |
+            ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/yatai-${{ matrix.service }}:${{ matrix.arch }}-${{ needs.prepare.outputs.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.tag }}
+          secrets: |
+            npm_registry_config=${{ env.NPM_REGISTRY_AUTH_KEY }}=${{ secrets.GITEA_CODE_PAT }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=yatai-${{ matrix.service }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=yatai-${{ matrix.service }}-${{ matrix.arch }}
+
+  # ── Job 3: Merge multi-arch manifests ──────────────────────────────
+  # Runs only when every build job succeeded, so a release moves :latest for all of
+  # its changed services or for none of them.
+  merge-manifest:
+    needs: [prepare, build-and-push]
+    if: needs.prepare.outputs.has_services == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(needs.prepare.outputs.services) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+
+      - name: Create and push manifest list
+        run: |
+          set -e
+          VERSION_TAG="${{ needs.prepare.outputs.tag }}"
+          IMAGE_BASE="${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/yatai-${{ matrix.service }}"
+
+          AMD64="${IMAGE_BASE}:amd64-${VERSION_TAG}"
+          ARM64="${IMAGE_BASE}:arm64-${VERSION_TAG}"
+
+          # Both must exist before anything is published: a half manifest would silently
+          # give one architecture a working image and the other a missing one.
+          docker manifest inspect "${AMD64}" >/dev/null
+          docker manifest inspect "${ARM64}" >/dev/null
+
+          for TAG in "${VERSION_TAG}" latest; do
+            TARGET="${IMAGE_BASE}:${TAG}"
+            docker manifest rm "${TARGET}" 2>/dev/null || true
+            docker manifest create "${TARGET}" --amend "${AMD64}" --amend "${ARM64}"
+            docker manifest push "${TARGET}"
+            echo "Pushed ${TARGET}"
+          done
+
+      - name: Inspect final manifest
+        run: |
+          docker manifest inspect "${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/yatai-${{ matrix.service }}:latest"
