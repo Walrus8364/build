@@ -19,8 +19,12 @@ on:
       - 'YaTai_Intelligence_Platform/trigger.txt'
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Tag to build (like v0.3.0). Defaults to the tag at the triggered commit.'
+      source_ref:
+        description: 'Gitea branch, tag, or commit to build. Manual acceptance may use an untagged branch commit.'
+        required: false
+        type: string
+      image_tag:
+        description: 'Image tag. Use acceptance-<name> before release, or v<version> for a release.'
         required: false
         type: string
       force_all:
@@ -29,7 +33,7 @@ on:
         type: boolean
         default: false
 
-# Every run moves the same :latest tags; two runs must never interleave.
+# Release runs move the same :latest tags; runs must never interleave.
 concurrency:
   group: yatai-intelligence-platform
   cancel-in-progress: false
@@ -49,6 +53,8 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       services: ${{ steps.detect.outputs.services }}
       has_services: ${{ steps.detect.outputs.has_services }}
+      sandbox_images: ${{ steps.detect.outputs.sandbox_images }}
+      release: ${{ steps.resolve.outputs.release }}
     steps:
       # Pinned to the event commit, not current main: the build repo is shared with
       # sibling projects, so main can already carry someone else's trigger by now.
@@ -68,31 +74,13 @@ jobs:
         id: resolve
         working-directory: src
         env:
-          MANUAL_TAG: ${{ github.event.inputs.tag }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          MANUAL_TAG: ${{ inputs.image_tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_FILE: ../trigger/YaTai_Intelligence_Platform/trigger.txt
         run: |
-          set -e
-          if [ -n "$MANUAL_TAG" ]; then
-            TAG="$MANUAL_TAG"
-            case "$TAG" in
-              v*) ;;
-              *) echo "::error::image builds only accept v* tags, got ${TAG}"; exit 1 ;;
-            esac
-            # Peel annotated tags: a tag object's own SHA is not the commit SHA
-            SHA=$(git rev-parse "refs/tags/${TAG}^{commit}")
-          else
-            SHA=$(tr -d '[:space:]' < ../trigger/YaTai_Intelligence_Platform/trigger.txt)
-            [ -n "$SHA" ] || { echo "::error::YaTai_Intelligence_Platform/trigger.txt is empty"; exit 1; }
-            # The tag must point *exactly* at the triggered commit. No git-describe
-            # fallback to the nearest ancestor tag: that would let an untagged commit
-            # be published under an existing version tag and silently overwrite it.
-            TAG=$(git tag --points-at "$SHA" --sort=-v:refname | grep '^v' | head -1 || true)
-            [ -n "$TAG" ] || { echo "::error::commit ${SHA} carries no v* tag"; exit 1; }
-          fi
-          # Change detection runs Nx against this exact commit's project graph.
-          git checkout --detach "$SHA"
-          echo "Building ${SHA} as ${TAG}"
-          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          python3 ../trigger/YaTai_Intelligence_Platform/resolve_source.py
 
       - uses: pnpm/action-setup@v4
         with:
@@ -132,9 +120,15 @@ jobs:
           IMAGE_PREFIX: ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/yatai-
         run: |
           set -euo pipefail
+          echo "sandbox_images=true" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.resolve.outputs.release }}" != true ]; then
+            echo 'services=[]' >> "$GITHUB_OUTPUT"
+            echo 'has_services=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Deployable services are every Nx app except the one-shot cutover CLI, which
           # runs from a host checkout. Same rule as scripts/docker-build-affected.sh.
-          ALL=$(pnpm --silent nx show projects --type=app --exclude=fs-cutover --json | jq -r '.[]' | sort)
+          ALL=$(pnpm --silent nx show projects --type=app --exclude=fs-cutover --exclude=sandbox-control-service --json | jq -r '.[]' | sort)
           # Files outside every Nx project that still change what an image contains
           # (the Dockerfile copies them). Nx project files are covered by `--affected`.
           GLOBAL_INPUTS=(Dockerfile .dockerignore .npmrc package.json pnpm-lock.yaml pnpm-workspace.yaml nx.json tsconfig.base.json tsconfig.json)
@@ -178,11 +172,15 @@ jobs:
             echo "has_services=true" >> "$GITHUB_OUTPUT"
             echo "Services to build: ${JSON}"
           fi
+          # Sandbox artifacts ship with the backend release. They are built from the
+          # exact source SHA even when no ordinary service changed, so formal hosts
+          # never need a local workspace/native/control build.
+          echo "sandbox_images=true" >> "$GITHUB_OUTPUT"
 
   # ── Job 2: Build & push per-service, per-architecture images ────────
   build-and-push:
     needs: prepare
-    if: needs.prepare.outputs.has_services == 'true'
+    if: needs.prepare.outputs.release == 'true' && needs.prepare.outputs.has_services == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -275,12 +273,61 @@ jobs:
           cache-from: type=gha,scope=yatai-${{ matrix.service }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=yatai-${{ matrix.service }}-${{ matrix.arch }}
 
+  # ── Job 2b: Build sandbox artifacts from the same source SHA ───────
+  # Formal accepts only immutable CI artifacts; official bases and tool hashes
+  # live in the private source. Acceptance runs never publish ordinary services.
+  build-sandbox:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [workspace, native, control, proxy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone private source at the resolved commit
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          git clone "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_CODE_PAT }}@${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/YaTai_Intelligence_Platform.git" src
+          git -C src checkout --detach "$SOURCE_SHA"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GITEA_HOST }}
+          username: ${{ secrets.GITEA_USERNAME }}
+          password: ${{ secrets.GITEA_REGISTRY_PAT }}
+      - name: Build immutable sandbox artifact (amd64 only)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image == 'control' && './src' || './src/apps/sandbox-control-service' }}
+          file: ./src/apps/sandbox-control-service/${{ matrix.image }}/Dockerfile
+          platforms: linux/amd64
+          tags: ${{ secrets.GITEA_HOST }}/${{ secrets.GITEA_USERNAME }}/yatai-sandbox-${{ matrix.image }}:${{ needs.prepare.outputs.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.tag }}
+          secrets: |
+            npm_registry_config=${{ env.NPM_REGISTRY_AUTH_KEY }}=${{ secrets.GITEA_CODE_PAT }}
+          push: true
+          provenance: false
+          sbom: false
+          # Private source and licensed fonts must not enter this public repo's GHA cache.
+      - name: Report the deployment digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ matrix.image }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: echo "$IMAGE $DIGEST revision=$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+
   # ── Job 3: Merge multi-arch manifests ──────────────────────────────
   # Runs only when every build job succeeded, so a release moves :latest for all of
   # its changed services or for none of them.
   merge-manifest:
-    needs: [prepare, build-and-push]
-    if: needs.prepare.outputs.has_services == 'true'
+    needs: [prepare, build-and-push, build-sandbox]
+    if: needs.prepare.outputs.release == 'true' && needs.prepare.outputs.has_services == 'true'
     strategy:
       fail-fast: false
       matrix:
